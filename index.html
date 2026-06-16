@@ -56,19 +56,31 @@ document.getElementById("imageInput").addEventListener("change", function(e){
 
         let percent;
 
-        if(brightness > 180){
+        if (brightness >= 165 && brightness <= 175) {
 
-            percent = "5%";
+    percent = "≤ 2.5%";
 
-        }else if(brightness > 120){
+} else if (brightness >= 155 && brightness < 165) {
 
-            percent = "10%";
+    percent = "≤ 5%";
 
-        }else{
+} else if (brightness >= 145 && brightness < 155) {
 
-            percent = "15%";
+    percent = "≤ 7.5%";
 
-        }
+} else if (brightness >= 135 && brightness < 145) {
+
+    percent = "≤ 10%";
+
+} else if (brightness < 135) {
+
+    percent = "> 10%";
+
+} else {
+
+    percent = "< 2.5%";
+
+}
 
         document.getElementById("result").innerHTML =
 
