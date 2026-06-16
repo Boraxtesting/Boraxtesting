@@ -4,15 +4,84 @@
 
 <head>
 
-  <title>Borax Detector</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Borax AI Detector</title>
 
 </head>
 
 <body>
 
-<h1>ระบบตรวจบอแรกซ์</h1>
+<h1>ระบบวิเคราะห์สีสารละลาย</h1>
 
-<p>เว็บของคุณทำงานแล้ว 🎉</p>
+<input type="file" id="imageInput" accept="image/*">
+
+<br><br>
+
+<canvas id="canvas" style="display:none;"></canvas>
+
+<h3 id="result">รออัปโหลดรูป...</h3>
+
+<script>
+
+document.getElementById("imageInput").addEventListener("change", function(e){
+
+    const file = e.target.files[0];
+
+    const img = new Image();
+
+    img.onload = function(){
+
+        const canvas = document.getElementById("canvas");
+
+        const ctx = canvas.getContext("2d");
+
+        canvas.width = img.width;
+
+        canvas.height = img.height;
+
+        ctx.drawImage(img,0,0);
+
+        const data = ctx.getImageData(0,0,canvas.width,canvas.height).data;
+
+        let total = 0;
+
+        for(let i=0;i<data.length;i+=4){
+
+            total += (data[i] + data[i+1] + data[i+2]) / 3;
+
+        }
+
+        const brightness = total / (data.length/4);
+
+        let percent;
+
+        if(brightness > 180){
+
+            percent = "5%";
+
+        }else if(brightness > 120){
+
+            percent = "10%";
+
+        }else{
+
+            percent = "15%";
+
+        }
+
+        document.getElementById("result").innerHTML =
+
+        "AI ประเมินความเข้มข้น ≈ " + percent;
+
+    };
+
+    img.src = URL.createObjectURL(file);
+
+});
+
+</script>
 
 </body>
+
 </html>
