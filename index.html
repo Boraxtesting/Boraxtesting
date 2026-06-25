@@ -154,6 +154,7 @@
         const baseTube = { L: 15.82, a: -13.15, b: -7.05 };
         const basePaper = { L: 41.35, a: -13.50, b: -1.25 };
 
+        // หมายเหตุ: ในชุดข้อมูล % สูง เฉดสีจะมีความเข้มและอิ่มตัวชัดเจนกว่า (คำนวณแบบ Chroma ร่วมด้วยอัตโนมัติใน Engine)
         const tubeDataset = [
             { concentration: "10%",   L: 16.63, a: -13.41, b: -6.71 },
             { concentration: "9%",    L: 16.89, a: -13.43, b: -6.47 },
@@ -242,5 +243,215 @@
             const startY = Math.floor(canvas.height / 2) - Math.floor(size / 2);
             const imgData = ctx.getImageData(startX, startY, size, size).data;
 
-            let rSum = 0,
+            let rSum = 0, gSum = 0, bSum = 0, totalPixels = 0;
+            let glossyReflectionCount = 0;
+
+            for (let i = 0; i < imgData.length; i += 4) {
+                const r = imgData[i]; const g = imgData[i+1]; const b = imgData[i+2];
+                if (r > 220 && g > 220 && b > 220) {
+                    glossyReflectionCount++;
+                    continue; 
+                }
+                rSum += r; gSum += g; bSum += b;
+                totalPixels++;
+            }
+
+            if (totalPixels === 0) {
+                for (let i = 0; i < imgData.length; i += 4) {
+                    rSum += imgData[i]; gSum += imgData[i+1]; bSum += imgData[i+2];
+                    totalPixels++;
+                }
+            }
+
+            const avgR = rSum / totalPixels;
+            const avgG = gSum / totalPixels;
+            const avgB = bSum / totalPixels;
+            const currentLab = rgbToLab(avgR, avgG, avgB);
+
+            // คำนวณค่าความอิ่มตัวของเฉดสีปัจจุบัน (Chroma/Saturation) ของชิ้นงานจริง
+            const currentSaturation = Math.sqrt(Math.pow(currentLab.a, 2) + Math.pow(currentLab.b, 2));
+
+            const objectDisplay = document.getElementById('objectTypeDisplay');
+            objectDisplay.className = "object-type";
+
+            // ==========================================
+            // 🧠 STEP 1: ระบบจำแนกประเภทสามทางเด็ดขาดแบบแยกพิกัด
+            // ==========================================
+            let assignedCategory = ""; 
+
+            const redToBlueRatio = avgR / (avgB + 0.1);
+            const greenToBlueRatio = avgG / (avgB + 0.1);
+            const totalPixelsChecked = imgData.length / 4;
+            const reflectionRatio = glossyReflectionCount / totalPixelsChecked;
+
+            if (currentLab.L <= 22.2 || reflectionRatio > 0.015 || (currentLab.L < 25.5 && currentLab.a < -13.3 && currentLab.b < -2.0)) {
+                assignedCategory = "TUBE";
+            }
+            else if (avgR > avgG && redToBlueRatio > 1.32 && greenToBlueRatio > 1.12 && currentLab.a > -10.5 && currentLab.b > 2.5) {
+                assignedCategory = "WOOD";
+            } 
+            else {
+                assignedCategory = "PAPER";
+            }
+
+            // ==========================================
+            // 🎯 STEP 2: คำนวณเปรียบเทียบ โดยใช้กลไกวิเคราะห์ระดับความอิ่มเฉดสีสกัดจุดเพี้ยน
+            // ==========================================
+            
+            if (assignedCategory === "WOOD") {
+                objectDisplay.innerText = `วัตถุที่ตรวจพบ: เนื้อไม้`;
+                objectDisplay.classList.add("type-wood");
+                
+                const woodSecureDataset = [
+                    { concentration: "10%", L: 28.45, a: -11.12, b: -8.15 },
+                    { concentration: "9%",  L: 29.10, a: -11.24, b: -7.80 }
+                ];
+                
+                let closestWoodMatch = woodSecureDataset[0];
+                let minWoodDeltaE = Infinity;
+                
+                woodSecureDataset.forEach(target => {
+                    const deltaE = Math.sqrt(
+                        Math.pow(currentLab.L - target.L, 2) +
+                        Math.pow((currentLab.a - target.a) * 2.0, 2) +
+                        Math.pow((currentLab.b - target.b) * 2.0, 2)
+                    );
+                    if (deltaE < minWoodDeltaE) {
+                        minWoodDeltaE = deltaE;
+                        closestWoodMatch = target;
+                    }
+                });
+
+                document.getElementById('concentrationResult').innerText = closestWoodMatch.concentration;
+                document.getElementById('resultArea').style.display = 'block';
+                return;
+            }
+
+            if (assignedCategory === "TUBE") {
+                objectDisplay.innerText = `วัตถุที่ตรวจพบ: หลอดทดลอง`;
+                objectDisplay.classList.add("type-tube");
+                
+                const deltaBaseTube = Math.sqrt(
+                    Math.pow(currentLab.L - baseTube.L, 2) +
+                    Math.pow(currentLab.a - baseTube.a, 2) +
+                    Math.pow(currentLab.b - baseTube.b, 2)
+                );
+                if (deltaBaseTube < 1.1) {
+                    document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
+                    document.getElementById('resultArea').style.display = 'block';
+                    return;
+                }
+
+                // ค้นหาคู่สีด้วยระบบ Hybrid (DeltaE + Saturation Penalty)
+                let closestMatch = tubeDataset[0];
+                let minScore = Infinity;
+
+                tubeDataset.forEach(target => {
+                    // 1. คำนวณระยะห่างสีสากลพื้นฐาน
+                    const deltaE = Math.sqrt(
+                        Math.pow(currentLab.L - target.L, 2) +
+                        Math.pow((currentLab.a - target.a) * 2.5, 2) + 
+                        Math.pow((currentLab.b - target.b) * 2.5, 2)
+                    );
+
+                    // 2. คำนวณค่าความเข้มเฉดสีของเป้าหมายใน Dataset (Target Saturation)
+                    const targetSaturation = Math.sqrt(Math.pow(target.a, 2) + Math.pow(target.b, 2));
+
+                    // 3. ตรวจสอบเงื่อนไขข้อเท็จจริง: ถ้าความเข้มข้นสารบอแรกซ์สูง (%สูง) เฉดสีในหลอดแก้วจะเข้มข้นและจัดจ้ากว่ากลุ่ม %ต่ำ
+                    // เพิ่มค่า Penalty (โทษปรับคะแนนระยะ) หากตัวเลือกขัดแย้งกับระดับความเข้มของเฉดสีจริง
+                    let saturationPenalty = 0;
+                    const isHighPercentTarget = parseFloat(target.concentration) >= 5;
+
+                    if (isHighPercentTarget && currentSaturation < targetSaturation * 0.9) {
+                        saturationPenalty = 15.0; // หากสีจริงจืด แต่สูตรเผลอดึงไปกลุ่ม % สูง จะโดนดีดกลับลงมา
+                    } else if (!isHighPercentTarget && currentSaturation > 14.5) {
+                        saturationPenalty = 15.0; // หากสีจริงเข้มจัดจ้ามากๆ แต่สูตรพยายามดึงลง % ต่ำ จะโดนปรับคะแนนหนี
+                    }
+
+                    const finalScore = deltaE + saturationPenalty;
+
+                    if (finalScore < minScore) {
+                        minScore = finalScore;
+                        closestMatch = target;
+                    }
+                });
+
+                document.getElementById('concentrationResult').innerText = closestMatch.concentration;
+                document.getElementById('resultArea').style.display = 'block';
+                return;
+            }
+
+            if (assignedCategory === "PAPER") {
+                objectDisplay.innerText = `วัตถุที่ตรวจพบ: กระดาษตรวจสอบ`;
+                objectDisplay.classList.add("type-paper");
+                
+                const deltaBasePaper = Math.sqrt(
+                    Math.pow(currentLab.L - basePaper.L, 2) +
+                    Math.pow(currentLab.a - basePaper.a, 2) +
+                    Math.pow(currentLab.b - basePaper.b, 2)
+                );
+                if (deltaBasePaper < 1.1) {
+                    document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
+                    document.getElementById('resultArea').style.display = 'block';
+                    return;
+                }
+
+                // ค้นหาคู่สีของกระดาษด้วยระบบ Hybrid (DeltaE + Saturation Penalty)
+                let closestMatch = paperDataset[0];
+                let minScore = Infinity;
+
+                paperDataset.forEach(target => {
+                    const deltaE = Math.sqrt(
+                        Math.pow(currentLab.L - target.L, 2) +
+                        Math.pow((currentLab.a - target.a) * 2.5, 2) +
+                        Math.pow((currentLab.b - target.b) * 2.5, 2)
+                    );
+
+                    const targetSaturation = Math.sqrt(Math.pow(target.a, 2) + Math.pow(target.b, 2));
+                    
+                    let saturationPenalty = 0;
+                    const isHighPercentTarget = parseFloat(target.concentration) >= 5;
+
+                    // กระดาษทดสอบ ยิ่งทำปฏิกิริยากับบอแรกซ์เข้มข้นสูง เฉดสีจะมีความอิ่มตัว (Chroma) สูงขึ้นอย่างชัดเจน
+                    if (isHighPercentTarget && currentSaturation < targetSaturation * 0.95) {
+                        saturationPenalty = 15.0; 
+                    } else if (!isHighPercentTarget && currentSaturation > 13.8) {
+                        saturationPenalty = 15.0; 
+                    }
+
+                    const finalScore = deltaE + saturationPenalty;
+
+                    if (finalScore < minScore) {
+                        minScore = finalScore;
+                        closestMatch = target;
+                    }
+                });
+
+                document.getElementById('concentrationResult').innerText = closestMatch.concentration;
+                document.getElementById('resultArea').style.display = 'block';
+                return;
+            }
+        }
+
+        function rgbToLab(r, g, b) {
+            let rNorm = r / 255, gNorm = g / 255, bNorm = b / 255;
+            rNorm = rNorm > 0.04045 ? Math.pow((rNorm + 0.055) / 1.055, 2.4) : rNorm / 12.92;
+            gNorm = gNorm > 0.04045 ? Math.pow((gNorm + 0.055) / 1.055, 2.4) : gNorm / 12.92;
+            bNorm = bNorm > 0.04045 ? Math.pow((bNorm + 0.055) / 1.055, 2.4) : bNorm / 12.92;
+            rNorm *= 100; gNorm *= 100; bNorm *= 100;
+
+            const x = rNorm * 0.4124 + gNorm * 0.3576 + bNorm * 0.1805;
+            const y = rNorm * 0.2126 + gNorm * 0.7152 + bNorm * 0.0722;
+            const z = rNorm * 0.0193 + gNorm * 0.1192 + bNorm * 0.9505;
+
+            let xN = x / 95.047, yN = y / 100.000, zN = z / 108.883;
+            xN = xN > 0.008856 ? Math.pow(xN, 1/3) : (7.787 * xN) + (16 / 116);
+            yN = yN > 0.008856 ? Math.pow(yN, 1/3) : (7.787 * yN) + (16 / 116);
+            zN = zN > 0.008856 ? Math.pow(zN, 1/3) : (7.787 * zN) + (16 / 116);
+
+            return { L: (116 * yN) - 16, a: 500 * (xN - yN), b: 200 * (yN - zN) };
+        }
+    </script>
+</body>
+</html>
 
