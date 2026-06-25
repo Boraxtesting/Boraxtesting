@@ -29,24 +29,22 @@
             box-shadow: 0 15px 35px rgba(0, 0, 0, 0.08);
             text-align: center;
             width: 100%;
-            max-width: 480px; /* ขยายขนาดกล่องให้กว้างขึ้นเด่นชัด */
+            max-width: 480px;
         }
 
-        /* หัวข้อตัวหนังสือใหญ่ขึ้น มีสีม่วง */
         h1 {
             font-size: 36px;
             font-weight: 700;
-            color: #6b46c1; /* สีม่วงหลัก */
+            color: #6b46c1;
             margin-bottom: 40px;
             letter-spacing: -0.5px;
         }
 
-        /* ปุ่มเลือกรูปภาพขนาดใหญ่พิเศษ (เปิดปุ๊บเห็นปั๊บ) */
         .btn-purple {
             background-color: #6b46c1;
             color: white;
-            padding: 22px 40px; /* เพิ่มความหนาและใหญ่ */
-            font-size: 24px;   /* ตัวหนังสือบนปุ่มใหญ่พิเศษ */
+            padding: 22px 40px;
+            font-size: 24px;
             font-weight: 700;
             border: none;
             border-radius: 18px;
@@ -101,6 +99,21 @@
             border-radius: 24px;
         }
 
+        .object-type.type-wood {
+            color: #854d0e;
+            background: #fef9c3;
+        }
+
+        .object-type.type-paper {
+            color: #0369a1;
+            background: #e0f2fe;
+        }
+
+        .object-type.type-tube {
+            color: #0e7490;
+            background: #ecfeff;
+        }
+
         .result-title {
             font-size: 16px;
             color: #4a5568;
@@ -110,7 +123,6 @@
             font-weight: 600;
         }
 
-        /* ตัวเลขแสดงผลลัพธ์เปอร์เซ็นต์ขนาดใหญ่ยักษ์ */
         .result-value {
             font-size: 58px;
             font-weight: 800;
@@ -139,11 +151,9 @@
     </div>
 
     <script>
-        // === 1. ค่าเบสควบคุมสารละลายและกระดาษเปล่าจากการทดลองของคุณ ===
         const baseTube = { L: 15.82, a: -13.15, b: -7.05 };
         const basePaper = { L: 41.35, a: -13.50, b: -1.25 };
 
-        // === 2. DATASET หลอดทดลอง (10% - 0.1%) ===
         const tubeDataset = [
             { concentration: "10%",   L: 16.63, a: -13.41, b: -6.71 },
             { concentration: "9%",    L: 16.89, a: -13.43, b: -6.47 },
@@ -166,7 +176,6 @@
             { concentration: "0.1%",  L: 21.68, a: -14.12, b: -2.04 }
         ];
 
-        // === 3. DATASET กระดาษทดสอบ (10% - 0.1% ครบถ้วนรัดกุม) ===
         const paperDataset = [
             { concentration: "10%",  L: 28.45, a: -11.12, b: -8.15 },
             { concentration: "9%",   L: 29.10, a: -11.24, b: -7.80 },
@@ -209,110 +218,29 @@
         function executeAdvancedBoraxEngine(img) {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            ctx.drawImage(img, 0, 0);
+            
+            const maxDimension = 800;
+            let width = img.naturalWidth;
+            let height = img.naturalHeight;
+            
+            if (width > maxDimension || height > maxDimension) {
+                if (width > height) {
+                    height = Math.round((height * maxDimension) / width);
+                    width = maxDimension;
+                } else {
+                    width = Math.round((width * maxDimension) / height);
+                    height = maxDimension;
+                }
+            }
+            
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(img, 0, 0, width, height);
 
-            // ใช้การดึงสเปกตรัมสีพื้นที่ 25% บริเวณใจกลางเพื่อความสม่ำเสมอของเม็ดสี
             const size = Math.floor(canvas.width * 0.25);
             const startX = Math.floor(canvas.width / 2) - Math.floor(size / 2);
             const startY = Math.floor(canvas.height / 2) - Math.floor(size / 2);
             const imgData = ctx.getImageData(startX, startY, size, size).data;
 
-            let rSum = 0, gSum = 0, bSum = 0, totalPixels = 0;
-            let glossyReflectionCount = 0;
+            let rSum = 0,
 
-            for (let i = 0; i < imgData.length; i += 4) {
-                const r = imgData[i]; const g = imgData[i+1]; const b = imgData[i+2];
-                // คัดแยกแสงสะท้อนวาวขาวออกจากเนื้อสีจริงเพื่อความรัดกุม
-                if (r > 225 && g > 225 && b > 225) {
-                    glossyReflectionCount++;
-                    continue; 
-                }
-                rSum += r; gSum += g; bSum += b;
-                totalPixels++;
-            }
-
-            // ป้องกันการหารด้วยศูนย์ในกรณีภาพขาวล้วน
-            if (totalPixels === 0) {
-                for (let i = 0; i < imgData.length; i += 4) {
-                    rSum += imgData[i]; gSum += imgData[i+1]; bSum += imgData[i+2];
-                    totalPixels++;
-                }
-            }
-
-            const currentLab = rgbToLab(rSum / totalPixels, gSum / totalPixels, bSum / totalPixels);
-
-            // --- 1. ตรวจสอบแยกแยะประเภทวัตถุอย่างรัดกุม ---
-            let isPaper = false;
-            let objectTypeLabel = "หลอดทดลอง";
-
-            // กระดาษตรวจสอบจะมีความสว่างพื้นผิว (L) และการกระจายตัวของเฉดสีที่จำเพาะเจาะจง
-            if (currentLab.L > 24.5 && glossyReflectionCount < (imgData.length / 4 * 0.05)) {
-                isPaper = true;
-                objectTypeLabel = "กระดาษตรวจสอบ";
-            }
-
-            // --- 2. การคาลิเบรตเปรียบเทียบค่าเบส (Baseline Checking) ---
-            const activeBaseline = isPaper ? basePaper : baseTube;
-            const deltaBase = Math.sqrt(
-                Math.pow(currentLab.L - activeBaseline.L, 2) +
-                Math.pow(currentLab.a - activeBaseline.a, 2) +
-                Math.pow(currentLab.b - activeBaseline.b, 2)
-            );
-
-            // หากค่าสีใกล้เคียงกับสารละลายเปล่าหรือกระดาษเปล่า (Delta E สั้นมาก) ให้แจ้งว่าเป็นค่าเบสทันที
-            if (deltaBase < 1.2) {
-                document.getElementById('objectTypeDisplay').innerText = `วัตถุที่ตรวจพบ: ${objectTypeLabel}`;
-                document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
-                document.getElementById('resultArea').style.display = 'block';
-                return;
-            }
-
-            // --- 3. การคำนวณจับคู่ % ที่ใกล้ที่สุดโดยห้ามใช้คำว่าประมาณ ---
-            const activeDataset = isPaper ? paperDataset : tubeDataset;
-            let closestMatch = activeDataset[0];
-            let minDeltaE = Infinity;
-
-            activeDataset.forEach(target => {
-                // ถ่วงน้ำหนักแกนสีเป็น 2 เท่า (Weight = 2.0) เพื่อเน้นการเปลี่ยนสีเคมี เลี่ยงผลกระทบจากความมืด/สว่างของภาพ
-                const deltaE = Math.sqrt(
-                    Math.pow(currentLab.L - target.L, 1.0) +
-                    Math.pow((currentLab.a - target.a) * 2.0, 2) +
-                    Math.pow((currentLab.b - target.b) * 2.0, 2)
-                );
-
-                if (deltaE < minDeltaE) {
-                    minDeltaE = deltaE;
-                    closestMatch = target;
-                }
-            });
-
-            // แสดงผลลัพธ์ข้อมูลดิบตรงๆ ทันที
-            document.getElementById('objectTypeDisplay').innerText = `วัตถุที่ตรวจพบ: ${objectTypeLabel}`;
-            document.getElementById('concentrationResult').innerText = closestMatch.concentration;
-            document.getElementById('resultArea').style.display = 'block';
-        }
-
-        // ตัวแปลงโมเดลคณิตศาสตร์สีสากล RGB เป็น CIE L*a*b*
-        function rgbToLab(r, g, b) {
-            let rNorm = r / 255, gNorm = g / 255, bNorm = b / 255;
-            rNorm = rNorm > 0.04045 ? Math.pow((rNorm + 0.055) / 1.055, 2.4) : rNorm / 12.92;
-            gNorm = gNorm > 0.04045 ? Math.pow((gNorm + 0.055) / 1.055, 2.4) : gNorm / 12.92;
-            bNorm = bNorm > 0.04045 ? Math.pow((bNorm + 0.055) / 1.055, 2.4) : bNorm / 12.92;
-            rNorm *= 100; gNorm *= 100; bNorm *= 100;
-
-            const x = rNorm * 0.4124 + gNorm * 0.3576 + bNorm * 0.1805;
-            const y = rNorm * 0.2126 + gNorm * 0.7152 + bNorm * 0.0722;
-            const z = rNorm * 0.0193 + gNorm * 0.1192 + bNorm * 0.9505;
-
-            let xN = x / 95.047, yN = y / 100.000, zN = z / 108.883;
-            xN = xN > 0.008856 ? Math.pow(xN, 1/3) : (7.787 * xN) + (16 / 116);
-            yN = yN > 0.008856 ? Math.pow(yN, 1/3) : (7.787 * yN) + (16 / 116);
-            zN = zN > 0.008856 ? Math.pow(zN, 1/3) : (7.787 * zN) + (16 / 116);
-
-            return { L: (116 * yN) - 16, a: 500 * (xN - yN), b: 200 * (yN - zN) };
-        }
-    </script>
-</body>
-</html>
