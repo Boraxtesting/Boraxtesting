@@ -136,49 +136,21 @@
         const baseTube = { L: 15.82, a: -13.15, b: -7.05 };
         const basePaper = { L: 41.35, a: -13.50, b: -1.25 };
 
-        // === ฐานข้อมูล หลอดทดลอง ===
+        // === ฐานข้อมูล หลอดทดลอง (แสดงเฉพาะ 10%, 5%, 1%, 0.5%, 0.1%) ===
         const tubeDataset = [
             { concentration: "10%",   L: 16.63, a: -13.41, b: -6.71 },
-            { concentration: "9%",    L: 16.89, a: -13.43, b: -6.47 },
-            { concentration: "8%",    L: 17.15, a: -13.46, b: -6.18 },
-            { concentration: "7%",    L: 17.52, a: -13.51, b: -5.85 },
-            { concentration: "6%",    L: 17.91, a: -13.54, b: -5.51 },
             { concentration: "5%",    L: 18.35, a: -13.58, b: -5.12 },
-            { concentration: "4%",    L: 18.78, a: -13.62, b: -4.73 },
-            { concentration: "3%",    L: 19.24, a: -13.67, b: -4.31 },
-            { concentration: "2%",    L: 19.72, a: -13.73, b: -3.88 },
             { concentration: "1%",    L: 20.54, a: -13.82, b: -3.12 },
-            { concentration: "0.9%",  L: 20.62, a: -13.84, b: -3.05 },
-            { concentration: "0.8%",  L: 20.71, a: -13.86, b: -2.98 },
-            { concentration: "0.7%",  L: 20.81, a: -13.88, b: -2.89 },
-            { concentration: "0.6%",  L: 20.92, a: -13.91, b: -2.78 },
             { concentration: "0.5%",  L: 21.05, a: -13.95, b: -2.64 },
-            { concentration: "0.4%",  L: 21.18, a: -13.98, b: -2.51 },
-            { concentration: "0.3%",  L: 21.32, a: -14.02, b: -2.38 },
-            { concentration: "0.2%",  L: 21.49, a: -14.07, b: -2.21 },
             { concentration: "0.1%",  L: 21.68, a: -14.12, b: -2.04 }
         ];
 
-        // === ฐานข้อมูล กระดาษตรวจสอบ ===
+        // === ฐานข้อมูล กระดาษตรวจสอบ (แสดงเฉพาะ 10%, 5%, 1%, 0.5%, 0.1%) ===
         const paperDataset = [
             { concentration: "10%",  L: 28.45, a: -11.12, b: -8.15 },
-            { concentration: "9%",   L: 29.10, a: -11.24, b: -7.80 },
-            { concentration: "8%",   L: 29.85, a: -11.38, b: -7.35 },
-            { concentration: "7%",   L: 30.60, a: -11.52, b: -6.90 },
-            { concentration: "6%",   L: 31.42, a: -11.68, b: -6.42 },
             { concentration: "5%",   L: 32.30, a: -11.85, b: -5.92 },
-            { concentration: "4%",   L: 33.15, a: -12.02, b: -5.40 },
-            { concentration: "3%",   L: 34.05, a: -12.20, b: -4.85 },
-            { concentration: "2%",   L: 35.00, a: -12.42, b: -4.25 },
             { concentration: "1%",   L: 36.20, a: -12.75, b: -3.40 },
-            { concentration: "0.9%", L: 36.55, a: -12.82, b: -3.20 },
-            { concentration: "0.8%", L: 36.92, a: -12.90, b: -2.98 },
-            { concentration: "0.7%", L: 37.30, a: -12.99, b: -2.75 },
-            { concentration: "0.6%", L: 37.72, a: -13.08, b: -2.50 },
             { concentration: "0.5%", L: 38.18, a: -13.18, b: -2.22 },
-            { concentration: "0.4%", L: 38.68, a: -13.28, b: -1.92 },
-            { concentration: "0.3%", L: 39.22, a: -13.38, b: -1.60 },
-            { concentration: "0.2%", L: 39.80, a: -13.44, b: -1.35 },
             { concentration: "0.1%", L: 40.45, a: -13.48, b: -1.28 }
         ];
 
@@ -240,38 +212,27 @@
                 objectTypeLabel = "กระดาษตรวจสอบ";
             }
 
-            // --- 2. ตรวจสอบค่าเบส (Baseline Verification) ---
+            // --- 2. ตรวจสอบค่าเบส (Baseline Verification) อิงจากค่า L ---
             const activeBaseline = isPaper ? basePaper : baseTube;
-            const distToBase = Math.sqrt(
-                Math.pow(currentLab.L - activeBaseline.L, 2) +
-                Math.pow(currentLab.a - activeBaseline.a, 2) +
-                Math.pow(currentLab.b - activeBaseline.b, 2)
-            );
+            const distToBaseL = Math.abs(currentLab.L - activeBaseline.L);
 
-            // ปรับค่าเผื่อความคลาดเคลื่อน (Tolerance) ของแสงให้กระชับขึ้นที่ 1.5
-            if (distToBase < 1.5) {
+            if (distToBaseL < 0.7) {
                 document.getElementById('objectTypeDisplay').innerText = `ความเข้มข้นที่ตรวจสอบได้: ${objectTypeLabel}`;
                 document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
                 document.getElementById('resultArea').style.display = 'block';
                 return;
             }
 
-            // --- 3. ค้นหาค่า % ที่แม่นยำที่สุด (เสถียร ไม่ดีดไป 0.1% มั่ว) ---
+            // --- 3. ค้นหาค่า % โดยพิจารณาจากผลต่างค่า L ที่น้อยที่สุด ---
             const activeDataset = isPaper ? paperDataset : tubeDataset;
             let closestMatch = activeDataset[0];
-            let minDeltaE = Infinity;
+            let minDiffL = Infinity;
 
             activeDataset.forEach(target => {
-                // ใช้สมการคำนวณความต่างทางสีแบบรักษาสมดุล (ไม่ยกกำลังแรงเกินไปจนค่าเอียง)
-                const dL = currentLab.L - target.L;
-                const da = currentLab.a - target.a;
-                const db = currentLab.b - target.b;
+                const diffL = Math.abs(currentLab.L - target.L);
 
-                // ถ่วงน้ำหนักแกนเฉดสี (a, b) ให้มากกว่าความสว่าง (L) เล็กน้อยแบบสมดุล
-                const deltaE = Math.sqrt((dL * 0.8) * (dL * 0.8) + (da * 1.2) * (da * 1.2) + (db * 1.2) * (db * 1.2));
-
-                if (deltaE < minDeltaE) {
-                    minDeltaE = deltaE;
+                if (diffL < minDiffL) {
+                    minDiffL = diffL;
                     closestMatch = target;
                 }
             });
