@@ -1,393 +1,1319 @@
+# Borax Detection Pipeline — โค้ดทั้งหมด (8 ไฟล์)
+
+คัดลอกแต่ละส่วนไปวางเป็นไฟล์ตามชื่อที่ระบุไว้ในโครงสร้างโฟลเดอร์นี้:
+
+```
+borax-pipeline/
+├── README.md
+├── paper_demo.csv
+├── python/
+│   ├── lab_extractor.py
+│   └── train_svm.py
+└── web/                      <-- โฟลเดอร์นี้คือส่วนที่ push ขึ้น GitHub Pages
+    ├── index.html
+    ├── roi.js
+    ├── svm.js
+    └── model_paper_demo.json
+```
+
+---
+
+## 1. README.md
+
+```markdown
+# Borax Detection Pipeline (paper / dipstick / solution)
+
+## โครงสร้าง
+```
+python/lab_extractor.py   สกัดค่า Lab จากรูป (3 ฟอร์แมต) -> CSV
+python/train_svm.py        เทรน SVM (RBF) จาก CSV -> model_<fmt>.json
+web/roi.js                 สกัด ROI + Lab ฝั่ง browser (canvas, ไม่ต้องมี server)
+web/svm.js                 ทำนายผลจาก model_<fmt>.json (libsvm-compatible, ไม่พึ่ง library)
+web/index.html             หน้าเว็บใช้งานจริง (อัปโหลดรูป -> วิเคราะห์ -> แสดงผล)
+paper_demo.csv             ตัวอย่างข้อมูล paper 0-1% (ค่าเฉลี่ยที่ verify แล้วจากบทสนทนา)
+web/model_paper_demo.json  โมเดลตัวอย่างจาก paper_demo.csv (ทดสอบ pipeline เท่านั้น)
+```
+
+## ขั้นตอนใช้งานจริง
+
+1. **เก็บรูปให้ครบทุกความเข้มข้นของแต่ละฟอร์แมต** (หลายรูป/คลาส ยิ่งมากยิ่งดี ไม่ใช่แค่ 1 รูป/คลาส)
+
+2. **สกัดค่า Lab เป็น CSV:**
+   ```bash
+   python lab_extractor.py path/to/paper_images/ --fmt paper --out paper_dataset.csv
+   ```
+   แล้วเปิดไฟล์ CSV เพิ่มคอลัมน์ `label` ให้ตรงกับความเข้มข้นจริงของแต่ละรูป (หรือ band-group เช่น "0.2-0.6" ตามที่วิเคราะห์ไว้ในบทสนทนา)
+
+3. **เทรนโมเดล:**
+   ```bash
+   python train_svm.py paper_dataset.csv --fmt paper --out model_paper.json
+   ```
+   ทำซ้ำสำหรับ dipstick และ solution
+
+4. **นำ `model_paper.json`, `model_dipstick.json`, `model_solution.json` ไปวางไว้ในโฟลเดอร์เดียวกับ `web/index.html`** แล้ว push ขึ้น GitHub Pages — หน้าเว็บจะโหลดโมเดลเหล่านี้อัตโนมัติ
+
+## ⚠️ ข้อควรระวังก่อนใช้จริง
+
+- **`model_paper_demo.json` เทรนจาก 1 ตัวอย่าง/คลาส (11 คลาส) เท่านั้น** — ใช้พิสูจน์ว่าโค้ด pipeline ทำงานถูกต้องแบบ end-to-end (Python export → JS decision function ตรงกับ sklearn) แต่**ไม่ควรใช้ตัดสินผลจริง** เพราะไม่มีการวัดความแปรปรวนเลย
+- ตามที่วิเคราะห์ไว้ในบทสนทนา: บาง class ใกล้กัน (เช่น paper 0.2-0.6%) แยกด้วย Lab ธรรมดายาก — ควรพิจารณา label เป็น band-group แทนการแยกละเอียดทีละ 0.1% ตามที่คุยกันไว้
+- `web/roi.js` เป็น simplified port จาก Python (ไม่มี morphological erosion เต็มรูปแบบ) ควรทดสอบเทียบผลกับ Python ก่อน deploy จริง
+```
+
+---
+
+## 2. paper_demo.csv
+
+```csv
+label,L,a,b
+0,71.22,-2.56,12.31
+0.1,48.92,-5.65,18.77
+0.2,51.83,-6.36,21.36
+0.3,52.88,-7.97,21.46
+0.4,51.32,-7.20,21.56
+0.5,55.87,-6.37,21.02
+0.6,55.93,-6.47,21.27
+0.7,51.14,-7.74,23.95
+0.8,54.88,-8.43,25.01
+0.9,52.09,-6.94,23.29
+1,64.91,-6.75,24.44
+```
+
+---
+
+## 3. python/lab_extractor.py
+
+```python
+"""
+lab_extractor.py
+=================
+สกัดค่า CIE L*a*b* จากภาพ 3 รูปแบบ (solution / paper / dipstick)
+ใช้ ROI method เดียวกับที่ verify ด้วยตาไปแล้วตลอด session นี้
+
+ใช้งาน:
+    from lab_extractor import extract_lab
+
+    result = extract_lab("path/to/image.jpg", fmt="paper")
+    # result = {"L": .., "a": .., "b": .., "L_std": .., "a_std": .., "b_std": .., "pixel_count": ..}
+
+fmt ต้องเป็นหนึ่งใน: "paper", "dipstick", "solution"
+"""
+
+import numpy as np
+from PIL import Image
+from skimage import color, morphology, measure
+
+
+def _trimmed_mean(x, pct=10):
+    xs = np.sort(x)
+    n = len(xs)
+    k = int(n * pct / 100)
+    if n - 2 * k <= 0:
+        return float(np.mean(xs))
+    return float(np.mean(xs[k:n - k]))
+
+
+def _stats_from_mask(arr, mask):
+    """คำนวณ Lab statistics จาก mask ที่ระบุ ROI แล้ว"""
+    lab = color.rgb2lab(arr)
+    L = lab[:, :, 0][mask]
+    a = lab[:, :, 1][mask]
+    b = lab[:, :, 2][mask]
+    return {
+        "L": round(_trimmed_mean(L), 3),
+        "a": round(_trimmed_mean(a), 3),
+        "b": round(_trimmed_mean(b), 3),
+        "L_std": round(float(np.std(L)), 3),
+        "a_std": round(float(np.std(a)), 3),
+        "b_std": round(float(np.std(b)), 3),
+        "pixel_count": int(mask.sum()),
+    }
+
+
+def _largest_region_mask(mask_bool, min_size, close_radius):
+    mask_clean = morphology.remove_small_objects(mask_bool, min_size=min_size)
+    mask_clean = morphology.closing(mask_clean, morphology.disk(close_radius))
+    labeled = measure.label(mask_clean)
+    if labeled.max() == 0:
+        return None
+    regions = measure.regionprops(labeled)
+    largest = max(regions, key=lambda r: r.area)
+    return labeled == largest.label
+
+
+# ---------------------------------------------------------------------------
+# PAPER — แถบกระดาษบนจานเพาะเชื้อ พื้นหลังขาว
+# crop กึ่งกลาง 55% ก่อน เพื่อตัดขอบจาน/โต๊ะ/watermark ออก
+# แล้ว segment เอาแถบกระดาษด้วยเกณฑ์ saturation ปานกลาง
+# ---------------------------------------------------------------------------
+def extract_paper_roi(image_path):
+    img = Image.open(image_path).convert("RGB")
+    w, h = img.size
+    arr_full = np.array(img).astype(np.float64) / 255.0
+
+    cw, ch = int(w * 0.55), int(h * 0.55)
+    x0, y0 = (w - cw) // 2, (h - ch) // 2
+    arr = arr_full[y0:y0 + ch, x0:x0 + cw, :]
+
+    hsv = color.rgb2hsv(arr)
+    sat, val = hsv[:, :, 1], hsv[:, :, 2]
+
+    mask = (sat > 0.10) & (sat < 0.6) & (val > 0.4)
+    roi = _largest_region_mask(mask, min_size=300, close_radius=3)
+    if roi is None:
+        raise ValueError(f"ไม่พบแถบกระดาษใน {image_path}")
+
+    roi_eroded = morphology.erosion(roi, morphology.disk(5))
+    if roi_eroded.sum() < 50:
+        roi_eroded = roi
+
+    return _stats_from_mask(arr, roi_eroded)
+
+
+# ---------------------------------------------------------------------------
+# DIPSTICK — ไม้จิ้มบนพื้นหลังกระดาษ/โต๊ะ
+# ไม่ crop กึ่งกลางตายตัว (ตำแหน่งแท่งไม้ในเฟรมไม่แน่นอน) ใช้ทั้งภาพแล้ว
+# segment ด้วย saturation/value ของสีน้ำตาล-เหลืองของไม้
+# ---------------------------------------------------------------------------
+def extract_dipstick_roi(image_path):
+    img = Image.open(image_path).convert("RGB")
+    arr = np.array(img).astype(np.float64) / 255.0
+
+    hsv = color.rgb2hsv(arr)
+    sat, val = hsv[:, :, 1], hsv[:, :, 2]
+
+    mask = (sat > 0.10) & (val > 0.2) & (val < 0.95)
+    roi = _largest_region_mask(mask, min_size=200, close_radius=2)
+    if roi is None:
+        raise ValueError(f"ไม่พบไม้จิ้มใน {image_path}")
+
+    roi_eroded = morphology.erosion(roi, morphology.disk(3))
+    if roi_eroded.sum() < 50:
+        roi_eroded = roi
+
+    return _stats_from_mask(arr, roi_eroded)
+
+
+# ---------------------------------------------------------------------------
+# SOLUTION — ของเหลวสีเขียว/เขียวอมฟ้าในหลอดทดลอง
+# segment ด้วย hue เฉพาะช่วงเขียว-เขียวอมฟ้า (teal) + ตัดขอบ meniscus/กระจกออก
+# ถ้าเป็น screenshot ของแอป Photos ให้ตัด UI chrome ด้านบนออกก่อน (top_crop_px)
+# ---------------------------------------------------------------------------
+def extract_solution_roi(image_path, top_crop_px=0):
+    img = Image.open(image_path).convert("RGB")
+    arr_full = np.array(img).astype(np.float64) / 255.0
+    arr = arr_full[top_crop_px:, :, :] if top_crop_px else arr_full
+
+    hsv = color.rgb2hsv(arr)
+    sat, val, hue = hsv[:, :, 1], hsv[:, :, 2], hsv[:, :, 0]
+
+    mask = (hue > 0.28) & (hue < 0.58) & (sat > 0.08) & (val < 0.85) & (val > 0.03)
+    roi = _largest_region_mask(mask, min_size=500, close_radius=5)
+    if roi is None:
+        raise ValueError(f"ไม่พบของเหลวใน {image_path}")
+
+    # erode มากหน่อยเพื่อตัด meniscus (เส้นดำที่ผิวของเหลว) และขอบหลอดแก้วออก
+    roi_eroded = morphology.erosion(roi, morphology.disk(10))
+    if roi_eroded.sum() < 200:
+        roi_eroded = morphology.erosion(roi, morphology.disk(5))
+    if roi_eroded.sum() < 100:
+        roi_eroded = roi
+
+    return _stats_from_mask(arr, roi_eroded)
+
+
+_EXTRACTORS = {
+    "paper": extract_paper_roi,
+    "dipstick": extract_dipstick_roi,
+    "solution": extract_solution_roi,
+}
+
+
+def extract_lab(image_path, fmt, **kwargs):
+    if fmt not in _EXTRACTORS:
+        raise ValueError(f"fmt ต้องเป็น {list(_EXTRACTORS.keys())}, ได้รับ '{fmt}'")
+    return _EXTRACTORS[fmt](image_path, **kwargs)
+
+
+if __name__ == "__main__":
+    import argparse, csv, glob, os
+
+    p = argparse.ArgumentParser(description="สกัดค่า Lab จากรูปทั้งโฟลเดอร์ -> CSV")
+    p.add_argument("folder", help="โฟลเดอร์รูปภาพ (ชื่อไฟล์ควรมี label เช่น 5pct_IMG_001.jpg)")
+    p.add_argument("--fmt", required=True, choices=["paper", "dipstick", "solution"])
+    p.add_argument("--out", default="lab_dataset.csv")
+    args = p.parse_args()
+
+    rows = []
+    for path in sorted(glob.glob(os.path.join(args.folder, "*"))):
+        try:
+            stats = extract_lab(path, args.fmt)
+            stats["file"] = os.path.basename(path)
+            rows.append(stats)
+            print(f"OK  {os.path.basename(path):30s} L={stats['L']:.2f} a={stats['a']:.2f} b={stats['b']:.2f}")
+        except Exception as e:
+            print(f"SKIP {os.path.basename(path):30s} ({e})")
+
+    if rows:
+        with open(args.out, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"\nบันทึก {len(rows)} แถวไปที่ {args.out}")
+        print("*** อย่าลืมเพิ่มคอลัมน์ 'label' (ความเข้มข้น/กลุ่ม) ก่อนนำไปเทรน ***")
+```
+
+---
+
+## 4. python/train_svm.py
+
+```python
+"""
+train_svm.py
+=============
+เทรน SVM (RBF kernel) จาก CSV ที่มีคอลัมน์: label, L, a, b
+แล้ว export เป็น model_<fmt>.json ที่ฝั่ง browser (svm.js) โหลดไปทำนายต่อได้เลย
+โดยไม่ต้องพึ่ง library ใดๆ ในฝั่งเว็บ (implement decision function เอง)
+
+การ export ใช้โครงสร้างแบบเดียวกับ libsvm internal (ตามที่ sklearn SVC ใช้จริง)
+เพื่อให้ reconstruct การทำนายแบบ one-vs-one ในฝั่ง JS ได้ตรงกับ sklearn 100%
+
+ใช้งาน:
+    python train_svm.py dataset.csv --fmt paper --out model_paper.json
+"""
+
+import argparse
+import csv
+import json
+
+import numpy as np
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+
+
+def load_dataset(csv_path):
+    X, y = [], []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            X.append([float(row["L"]), float(row["a"]), float(row["b"])])
+            y.append(str(row["label"]))
+    return np.array(X), np.array(y)
+
+
+def train(X, y):
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+
+    # จำนวน fold ต้องไม่เกินจำนวนตัวอย่างของคลาสที่น้อยที่สุด
+    _, counts = np.unique(y, return_counts=True)
+    n_splits = max(2, min(5, counts.min()))
+
+    param_grid = {
+        "C": [1, 10, 50, 100, 500],
+        "gamma": ["scale", 0.1, 0.5, 1, 5],
+    }
+
+    if counts.min() >= 2:
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        search = GridSearchCV(SVC(kernel="rbf", decision_function_shape="ovo"),
+                               param_grid, cv=cv, n_jobs=-1)
+        search.fit(Xs, y)
+        model = search.best_estimator_
+        print(f"Best params: {search.best_params_}  |  CV acc: {search.best_score_:.3f}")
+    else:
+        # ข้อมูลน้อยเกินจะทำ CV ได้ (เช่น 1 ตัวอย่าง/คลาส) -> เทรนตรงๆ เพื่อ demo pipeline เท่านั้น
+        print("⚠️  บางคลาสมีตัวอย่างน้อยกว่า 2 รูป — ข้าม GridSearchCV, เทรนแบบ default (ใช้ demo/ตรวจโค้ดเท่านั้น ไม่ควรใช้จริง)")
+        model = SVC(kernel="rbf", C=10, gamma="scale", decision_function_shape="ovo")
+        model.fit(Xs, y)
+
+    return model, scaler
+
+
+def export_model(model, scaler, classes_order, out_path):
+    """
+    Export โครงสร้างแบบ libsvm-compatible สำหรับ multiclass RBF SVM (one-vs-one)
+    ตรงกับที่ sklearn SVC เก็บภายใน (model.support_vectors_, model.dual_coef_,
+    model.intercept_, model.n_support_) เพื่อให้ JS ฝั่ง client คำนวณ decision
+    function แบบเดียวกับ libsvm ทุกประการ
+    """
+    gamma = model._gamma if hasattr(model, "_gamma") else model.gamma
+
+    payload = {
+        "kernel": "rbf",
+        "gamma": float(gamma),
+        "classes": list(model.classes_),
+        "n_support": model.n_support_.tolist(),
+        "support_vectors": model.support_vectors_.tolist(),
+        "dual_coef": model.dual_coef_.tolist(),
+        "intercept": model.intercept_.tolist(),
+        "scaler_mean": scaler.mean_.tolist(),
+        "scaler_scale": scaler.scale_.tolist(),
+        "feature_order": ["L", "a", "b"],
+    }
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    print(f"บันทึกโมเดลไปที่ {out_path}")
+    print(f"classes: {payload['classes']}")
+    print(f"จำนวน support vectors: {sum(payload['n_support'])}")
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("csv_path", help="ไฟล์ CSV: label,L,a,b")
+    p.add_argument("--fmt", required=True, choices=["paper", "dipstick", "solution"])
+    p.add_argument("--out", default=None)
+    args = p.parse_args()
+
+    out_path = args.out or f"model_{args.fmt}.json"
+
+    X, y = load_dataset(args.csv_path)
+    print(f"โหลด {len(X)} ตัวอย่าง, {len(set(y))} คลาส: {sorted(set(y))}")
+
+    model, scaler = train(X, y)
+    export_model(model, scaler, sorted(set(y)), out_path)
+```
+
+---
+
+## 5. web/index.html
+
+```html
 <!DOCTYPE html>
 <html lang="th">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ตรวจสอบบอแรกซ์</title>
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            font-family: 'Helvetica Neue', Arial, sans-serif;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ตรวจสอบบอแรกซ์</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --purple: #6E3DE8;
+    --purple-dark: #5b2fd1;
+    --purple-glow: rgba(110,61,232,0.35);
+    --bg: #F3F2FA;
+    --card: #FFFFFF;
+    --text: #2B2540;
+    --muted: #8A84A3;
+    --warn-bg: #FFF6E5;
+    --warn-text: #A9700A;
+    --ok-bg: #EAF7EE;
+    --ok-text: #1E8A4C;
+    --err-bg: #FDEAEA;
+    --err-text: #C23A3A;
+    --border: #ECE9F7;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0; min-height:100vh; background: var(--bg);
+    font-family: 'Kanit', sans-serif; color: var(--text);
+    display:flex; justify-content:center; padding: 32px 16px 60px;
+  }
+  .app{ width:100%; max-width: 480px; display:flex; flex-direction:column; gap:20px; }
+  .card{
+    background: var(--card); border-radius: 28px; padding: 36px 28px;
+    box-shadow: 0 10px 30px rgba(90,60,180,0.08); text-align:center;
+  }
+  h1{ color: var(--purple); font-size: 1.7rem; font-weight: 700; margin: 0 0 24px; }
 
-        body {
-            background-color: #f0f4f8;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            color: #2d3748;
-            padding: 20px;
-        }
+  /* --- format selector --- */
+  .fmt-group{ display:flex; gap:8px; margin-bottom:24px; }
+  .fmt-option{ flex:1; }
+  .fmt-option input{ display:none; }
+  .fmt-option label{
+    display:block; padding: 12px 6px; border-radius:14px;
+    border: 1.5px solid var(--border); font-size:0.9rem; font-weight:500;
+    color: var(--muted); cursor:pointer; transition: all .15s ease;
+  }
+  .fmt-option input:checked + label{
+    background: var(--purple); border-color: var(--purple); color:#fff; font-weight:600;
+  }
 
-        .container {
-            background: #ffffff;
-            padding: 50px 40px;
-            border-radius: 28px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.08);
-            text-align: center;
-            width: 100%;
-            max-width: 480px;
-        }
+  .file-label{
+    display:inline-flex; align-items:center; justify-content:center; width:100%;
+    padding: 18px 24px; border-radius: 18px; background: var(--purple); color:#fff;
+    font-size: 1.15rem; font-weight:600; cursor:pointer;
+    box-shadow: 0 8px 24px var(--purple-glow);
+    transition: transform .15s ease, background .15s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .file-label:active{ transform: scale(0.98); }
+  .file-label:hover{ background: var(--purple-dark); }
+  input[type="file"]{ display:none; }
 
-        h1 {
-            font-size: 36px;
-            font-weight: 700;
-            color: #6b46c1;
-            margin-bottom: 40px;
-            letter-spacing: -0.5px;
-        }
+  .hint{ margin: 14px 4px 0; font-size: 0.9rem; line-height:1.5; color: var(--muted); }
 
-        .btn-purple {
-            background-color: #6b46c1;
-            color: white;
-            padding: 22px 40px;
-            font-size: 24px;
-            font-weight: 700;
-            border: none;
-            border-radius: 18px;
-            cursor: pointer;
-            transition: all 0.2s ease-in-out;
-            display: inline-block;
-            width: 100%;
-            box-shadow: 0 6px 20px rgba(107, 70, 193, 0.4);
-        }
+  .count-pill{
+    display:inline-block; margin-top:16px; padding: 6px 14px;
+    border-radius: 999px; font-size: 0.85rem; font-weight:600;
+  }
+  .count-pill.warn{ background: var(--warn-bg); color: var(--warn-text); }
+  .count-pill.ok{ background: var(--ok-bg); color: var(--ok-text); }
 
-        .btn-purple:hover {
-            background-color: #553c9a;
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(107, 70, 193, 0.5);
-        }
+  .thumb-grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-top:18px; }
+  .thumb-grid img{
+    width:100%; aspect-ratio: 1 / 1; object-fit:cover; border-radius:14px;
+    border: 1px solid var(--border);
+  }
 
-        .btn-purple:active {
-            transform: translateY(1px);
-        }
+  .btn-analyze{
+    width:100%; margin-top:22px; padding: 16px; border:none; border-radius:18px;
+    background: var(--purple); color:#fff; font-family:'Kanit', sans-serif;
+    font-size: 1.05rem; font-weight:600; cursor:pointer;
+    box-shadow: 0 8px 24px var(--purple-glow);
+    transition: transform .15s ease, background .15s ease, opacity .15s ease;
+  }
+  .btn-analyze:disabled{ opacity:.45; box-shadow:none; cursor:not-allowed; }
+  .btn-analyze:not(:disabled):active{ transform: scale(0.98); }
+  .btn-analyze:not(:disabled):hover{ background: var(--purple-dark); }
 
-        #fileInput {
-            display: none;
-        }
+  .btn-reset{
+    margin-top:22px; background:none; border: 1.5px solid var(--border); color: var(--muted);
+    padding: 12px 20px; border-radius:14px; font-family:'Kanit', sans-serif;
+    font-size: 0.95rem; font-weight:500; cursor:pointer;
+  }
+  .btn-reset:hover{ border-color: var(--purple); color: var(--purple); }
 
-        .preview-area {
-            margin-top: 35px;
-            display: none;
-        }
+  .result-card{ text-align:center; }
+  .result-tag{
+    display:inline-block; background: #F1EDFC; color: var(--purple); font-size: 0.85rem;
+    font-weight:600; padding: 6px 16px; border-radius: 999px; margin-bottom: 18px;
+  }
+  .result-caption{ font-size: 0.95rem; color: var(--muted); margin: 18px 0 4px; }
+  .result-value{ font-size: 3.4rem; font-weight:700; color: var(--purple); margin: 0 0 6px; line-height:1.1; }
+  .result-note{ font-size: 0.78rem; color: var(--muted); margin: 0 0 8px; }
 
-        #imagePreview {
-            max-width: 100%;
-            max-height: 280px;
-            border-radius: 16px;
-            box-shadow: 0 6px 16px rgba(0,0,0,0.1);
-        }
+  .error-box{
+    background: var(--err-bg); color: var(--err-text); border-radius:14px;
+    padding: 14px 16px; font-size:0.9rem; margin-top:18px; text-align:left; line-height:1.5;
+  }
 
-        .result-area {
-            margin-top: 40px;
-            padding-top: 30px;
-            border-top: 3px solid #e2e8f0;
-            display: none;
-        }
+  .hidden{ display:none !important; }
 
-        .object-type {
-            font-size: 16px;
-            font-weight: 700;
-            color: #2b6cb0;
-            margin-bottom: 15px;
-            background: #ebf8ff;
-            display: inline-block;
-            padding: 8px 20px;
-            border-radius: 24px;
-        }
-
-        .object-type.type-wood {
-            color: #854d0e;
-            background: #fef9c3;
-        }
-
-        .object-type.type-paper {
-            color: #0369a1;
-            background: #e0f2fe;
-        }
-
-        .object-type.type-tube {
-            color: #0e7490;
-            background: #ecfeff;
-        }
-
-        .result-title {
-            font-size: 16px;
-            color: #4a5568;
-            text-transform: uppercase;
-            letter-spacing: 1.5px;
-            margin-bottom: 10px;
-            font-weight: 600;
-        }
-
-        .result-value {
-            font-size: 58px;
-            font-weight: 800;
-            color: #6b46c1;
-            margin-top: 5px;
-        }
-    </style>
+  .spinner{
+    width:22px; height:22px; border-radius:50%; border: 3px solid rgba(255,255,255,.4);
+    border-top-color: #fff; animation: spin .7s linear infinite;
+    display:inline-block; margin-right:10px; vertical-align: -4px;
+  }
+  @keyframes spin{ to{ transform: rotate(360deg); } }
+</style>
 </head>
 <body>
 
-    <div class="container">
-        <h1>ตรวจสอบบอแรกซ์</h1>
-        
-        <input type="file" id="fileInput" accept="image/*">
-        <button class="btn-purple" onclick="document.getElementById('fileInput').click()">เลือกรูป</button>
+<div class="app">
 
-        <div class="preview-area" id="previewArea">
-            <img id="imagePreview" src="" alt="ตัวอย่างรูปภาพ">
-        </div>
+  <!-- ================= อัปโหลดรูป ================= -->
+  <div class="card" id="uploadCard">
+    <h1>ตรวจสอบบอแรกซ์</h1>
 
-        <div class="result-area" id="resultArea">
-            <div id="objectTypeDisplay" class="object-type">กำลังวิเคราะห์...</div>
-            <div class="result-title">ความเข้มข้นที่ตรวจพบ</div>
-            <div class="result-value" id="concentrationResult">0%</div>
-        </div>
+    <div class="fmt-group" id="fmtGroup">
+      <div class="fmt-option">
+        <input type="radio" name="fmt" id="fmt-paper" value="paper" checked>
+        <label for="fmt-paper">กระดาษ</label>
+      </div>
+      <div class="fmt-option">
+        <input type="radio" name="fmt" id="fmt-dipstick" value="dipstick">
+        <label for="fmt-dipstick">ไม้จิ้ม</label>
+      </div>
+      <div class="fmt-option">
+        <input type="radio" name="fmt" id="fmt-solution" value="solution">
+        <label for="fmt-solution">สารละลาย</label>
+      </div>
     </div>
 
-    <script>
-        const baseTube = { L: 15.82, a: -13.15, b: -7.05 };
-        const basePaper = { L: 41.35, a: -13.50, b: -1.25 };
+    <label class="file-label" for="fileInput">เลือกรูป</label>
+    <input type="file" id="fileInput" accept="image/*" multiple>
 
-        // หมายเหตุ: ในชุดข้อมูล % สูง เฉดสีจะมีความเข้มและอิ่มตัวชัดเจนกว่า (คำนวณแบบ Chroma ร่วมด้วยอัตโนมัติใน Engine)
-        const tubeDataset = [
-            { concentration: "10%",   L: 16.63, a: -13.41, b: -6.71 },
-            { concentration: "9%",    L: 16.89, a: -13.43, b: -6.47 },
-            { concentration: "8%",    L: 17.15, a: -13.46, b: -6.18 },
-            { concentration: "7%",    L: 17.52, a: -13.51, b: -5.85 },
-            { concentration: "6%",    L: 17.91, a: -13.54, b: -5.51 },
-            { concentration: "5%",    L: 18.35, a: -13.58, b: -5.12 },
-            { concentration: "4%",    L: 18.78, a: -13.62, b: -4.73 },
-            { concentration: "3%",    L: 19.24, a: -13.67, b: -4.31 },
-            { concentration: "2%",    L: 19.72, a: -13.73, b: -3.88 },
-            { concentration: "1%",    L: 20.54, a: -13.82, b: -3.12 },
-            { concentration: "0.9%",  L: 20.62, a: -13.84, b: -3.05 },
-            { concentration: "0.8%",  L: 20.71, a: -13.86, b: -2.98 },
-            { concentration: "0.7%",  L: 20.81, a: -13.88, b: -2.89 },
-            { concentration: "0.6%",  L: 20.92, a: -13.91, b: -2.78 },
-            { concentration: "0.5%",  L: 21.05, a: -13.95, b: -2.64 },
-            { concentration: "0.4%",  L: 21.18, a: -13.98, b: -2.51 },
-            { concentration: "0.3%",  L: 21.32, a: -14.02, b: -2.38 },
-            { concentration: "0.2%",  L: 21.49, a: -14.07, b: -2.21 },
-            { concentration: "0.1%",  L: 21.68, a: -14.12, b: -2.04 }
-        ];
+    <p class="hint">📷 ควรเลือกมากกว่า 3 รูป เพื่อความแม่นยำในการวิเคราะห์</p>
 
-        const paperDataset = [
-            { concentration: "10%",  L: 28.45, a: -11.12, b: -8.15 },
-            { concentration: "9%",   L: 29.10, a: -11.24, b: -7.80 },
-            { concentration: "8%",   L: 29.85, a: -11.38, b: -7.35 },
-            { concentration: "7%",   L: 30.60, a: -11.52, b: -6.90 },
-            { concentration: "6%",   L: 31.42, a: -11.68, b: -6.42 },
-            { concentration: "5%",   L: 32.30, a: -11.85, b: -5.92 },
-            { concentration: "4%",   L: 33.15, a: -12.02, b: -5.40 },
-            { concentration: "3%",   L: 34.05, a: -12.20, b: -4.85 },
-            { concentration: "2%",   L: 35.00, a: -12.42, b: -4.25 },
-            { concentration: "1%",   L: 36.20, a: -12.75, b: -3.40 },
-            { concentration: "0.9%", L: 36.55, a: -12.82, b: -3.20 },
-            { concentration: "0.8%", L: 36.92, a: -12.90, b: -2.98 },
-            { concentration: "0.7%", L: 37.30, a: -12.99, b: -2.75 },
-            { concentration: "0.6%", L: 37.72, a: -13.08, b: -2.50 },
-            { concentration: "0.5%", L: 38.18, a: -13.18, b: -2.22 },
-            { concentration: "0.4%", L: 38.68, a: -13.28, b: -1.92 },
-            { concentration: "0.3%", L: 39.22, a: -13.38, b: -1.60 },
-            { concentration: "0.2%", L: 39.80, a: -13.44, b: -1.35 },
-            { concentration: "0.1%", L: 40.45, a: -13.48, b: -1.28 }
-        ];
+    <div id="countPill"></div>
+    <div class="thumb-grid" id="thumbGrid"></div>
+    <div id="errorBox"></div>
 
-        document.getElementById('fileInput').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
+    <button class="btn-analyze" id="analyzeBtn" disabled>วิเคราะห์ผล</button>
+  </div>
 
-            const reader = new FileReader();
-            reader.onload = function(event) {
-                const imgElement = document.getElementById('imagePreview');
-                imgElement.src = event.target.result;
-                document.getElementById('previewArea').style.display = 'block';
+  <!-- ================= ผลลัพธ์ ================= -->
+  <div class="card result-card hidden" id="resultCard">
+    <span class="result-tag" id="materialTag">วัตถุที่ตรวจพบ</span>
+    <p class="result-caption">ความเข้มข้นที่ตรวจพบ</p>
+    <p class="result-value" id="concentrationValue">-</p>
+    <p class="result-note" id="resultNote"></p>
 
-                imgElement.onload = function() {
-                    executeAdvancedBoraxEngine(imgElement);
-                };
-            };
-            reader.readAsDataURL(file);
-        });
+    <div class="thumb-grid" id="resultThumbGrid"></div>
 
-        function executeAdvancedBoraxEngine(img) {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            const maxDimension = 800;
-            let width = img.naturalWidth;
-            let height = img.naturalHeight;
-            
-            if (width > maxDimension || height > maxDimension) {
-                if (width > height) {
-                    height = Math.round((height * maxDimension) / width);
-                    width = maxDimension;
-                } else {
-                    width = Math.round((width * maxDimension) / height);
-                    height = maxDimension;
-                }
-            }
-            
-            canvas.width = width;
-            canvas.height = height;
-            ctx.drawImage(img, 0, 0, width, height);
+    <button class="btn-reset" id="resetBtn">ตรวจใหม่อีกครั้ง</button>
+  </div>
 
-            const size = Math.floor(canvas.width * 0.25);
-            const startX = Math.floor(canvas.width / 2) - Math.floor(size / 2);
-            const startY = Math.floor(canvas.height / 2) - Math.floor(size / 2);
-            const imgData = ctx.getImageData(startX, startY, size, size).data;
+</div>
 
-            let rSum = 0, gSum = 0, bSum = 0, totalPixels = 0;
-            let glossyReflectionCount = 0;
+<script src="roi.js"></script>
+<script src="svm.js"></script>
+<script>
+const fileInput       = document.getElementById('fileInput');
+const thumbGrid        = document.getElementById('thumbGrid');
+const countPill        = document.getElementById('countPill');
+const errorBox         = document.getElementById('errorBox');
+const analyzeBtn       = document.getElementById('analyzeBtn');
+const uploadCard       = document.getElementById('uploadCard');
+const resultCard       = document.getElementById('resultCard');
+const resultThumbGrid  = document.getElementById('resultThumbGrid');
+const concentrationEl  = document.getElementById('concentrationValue');
+const materialTag      = document.getElementById('materialTag');
+const resultNote       = document.getElementById('resultNote');
+const resetBtn         = document.getElementById('resetBtn');
 
-            for (let i = 0; i < imgData.length; i += 4) {
-                const r = imgData[i]; const g = imgData[i+1]; const b = imgData[i+2];
-                if (r > 220 && g > 220 && b > 220) {
-                    glossyReflectionCount++;
-                    continue; 
-                }
-                rSum += r; gSum += g; bSum += b;
-                totalPixels++;
-            }
+const FORMAT_LABEL = { paper: 'กระดาษตรวจสอบ', dipstick: 'ไม้จิ้มตรวจสอบ', solution: 'สารละลาย' };
+const MIN_RECOMMENDED_IMAGES = 3;
 
-            if (totalPixels === 0) {
-                for (let i = 0; i < imgData.length; i += 4) {
-                    rSum += imgData[i]; gSum += imgData[i+1]; bSum += imgData[i+2];
-                    totalPixels++;
-                }
-            }
+let selectedFiles = [];
+const modelCache = {}; // fmt -> SVMModel | null (null = โหลดไม่สำเร็จ)
 
-            const avgR = rSum / totalPixels;
-            const avgG = gSum / totalPixels;
-            const avgB = bSum / totalPixels;
-            const currentLab = rgbToLab(avgR, avgG, avgB);
+function currentFormat(){
+  return document.querySelector('input[name="fmt"]:checked').value;
+}
 
-            // คำนวณค่าความอิ่มตัวของเฉดสีปัจจุบัน (Chroma/Saturation) ของชิ้นงานจริง
-            const currentSaturation = Math.sqrt(Math.pow(currentLab.a, 2) + Math.pow(currentLab.b, 2));
+fileInput.addEventListener('change', (e) => {
+  selectedFiles = Array.from(e.target.files || []);
+  renderPreview();
+});
 
-            const objectDisplay = document.getElementById('objectTypeDisplay');
-            objectDisplay.className = "object-type";
+function renderPreview(){
+  thumbGrid.innerHTML = '';
+  countPill.innerHTML = '';
+  errorBox.innerHTML = '';
 
-            // ==========================================
-            // 🧠 STEP 1: ระบบจำแนกประเภทสามทางเด็ดขาดแบบแยกพิกัด
-            // ==========================================
-            let assignedCategory = ""; 
+  if (selectedFiles.length === 0){
+    analyzeBtn.disabled = true;
+    return;
+  }
 
-            const redToBlueRatio = avgR / (avgB + 0.1);
-            const greenToBlueRatio = avgG / (avgB + 0.1);
-            const totalPixelsChecked = imgData.length / 4;
-            const reflectionRatio = glossyReflectionCount / totalPixelsChecked;
+  const pill = document.createElement('span');
+  pill.className = 'count-pill ' + (selectedFiles.length < MIN_RECOMMENDED_IMAGES ? 'warn' : 'ok');
+  pill.textContent = selectedFiles.length < MIN_RECOMMENDED_IMAGES
+    ? `เลือกแล้ว ${selectedFiles.length} รูป — แนะนำให้เลือกมากกว่า ${MIN_RECOMMENDED_IMAGES} รูป`
+    : `เลือกแล้ว ${selectedFiles.length} รูป ✓`;
+  countPill.appendChild(pill);
 
-            if (currentLab.L <= 22.2 || reflectionRatio > 0.015 || (currentLab.L < 25.5 && currentLab.a < -13.3 && currentLab.b < -2.0)) {
-                assignedCategory = "TUBE";
-            }
-            else if (avgR > avgG && redToBlueRatio > 1.32 && greenToBlueRatio > 1.12 && currentLab.a > -10.5 && currentLab.b > 2.5) {
-                assignedCategory = "WOOD";
-            } 
-            else {
-                assignedCategory = "PAPER";
-            }
+  selectedFiles.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = document.createElement('img');
+      img.src = ev.target.result;
+      thumbGrid.appendChild(img);
+    };
+    reader.readAsDataURL(file);
+  });
 
-            // ==========================================
-            // 🎯 STEP 2: คำนวณเปรียบเทียบ โดยใช้กลไกวิเคราะห์ระดับความอิ่มเฉดสีสกัดจุดเพี้ยน
-            // ==========================================
-            
-            if (assignedCategory === "WOOD") {
-                objectDisplay.innerText = `วัตถุที่ตรวจพบ: เนื้อไม้`;
-                objectDisplay.classList.add("type-wood");
-                
-                const woodSecureDataset = [
-                    { concentration: "10%", L: 28.45, a: -11.12, b: -8.15 },
-                    { concentration: "9%",  L: 29.10, a: -11.24, b: -7.80 }
-                ];
-                
-                let closestWoodMatch = woodSecureDataset[0];
-                let minWoodDeltaE = Infinity;
-                
-                woodSecureDataset.forEach(target => {
-                    const deltaE = Math.sqrt(
-                        Math.pow(currentLab.L - target.L, 2) +
-                        Math.pow((currentLab.a - target.a) * 2.0, 2) +
-                        Math.pow((currentLab.b - target.b) * 2.0, 2)
-                    );
-                    if (deltaE < minWoodDeltaE) {
-                        minWoodDeltaE = deltaE;
-                        closestWoodMatch = target;
-                    }
-                });
+  analyzeBtn.disabled = false;
+}
 
-                document.getElementById('concentrationResult').innerText = closestWoodMatch.concentration;
-                document.getElementById('resultArea').style.display = 'block';
-                return;
-            }
+analyzeBtn.addEventListener('click', async () => {
+  analyzeBtn.disabled = true;
+  errorBox.innerHTML = '';
+  analyzeBtn.innerHTML = '<span class="spinner"></span>กำลังวิเคราะห์...';
 
-            if (assignedCategory === "TUBE") {
-                objectDisplay.innerText = `วัตถุที่ตรวจพบ: หลอดทดลอง`;
-                objectDisplay.classList.add("type-tube");
-                
-                const deltaBaseTube = Math.sqrt(
-                    Math.pow(currentLab.L - baseTube.L, 2) +
-                    Math.pow(currentLab.a - baseTube.a, 2) +
-                    Math.pow(currentLab.b - baseTube.b, 2)
-                );
-                if (deltaBaseTube < 1.1) {
-                    document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
-                    document.getElementById('resultArea').style.display = 'block';
-                    return;
-                }
+  const fmt = currentFormat();
 
-                // ค้นหาคู่สีด้วยระบบ Hybrid (DeltaE + Saturation Penalty)
-                let closestMatch = tubeDataset[0];
-                let minScore = Infinity;
+  try {
+    const result = await classifyImages(selectedFiles, fmt);
+    showResult(result, fmt);
+  } catch (err) {
+    errorBox.innerHTML = `<div class="error-box">⚠️ ${err.message}</div>`;
+  }
 
-                tubeDataset.forEach(target => {
-                    // 1. คำนวณระยะห่างสีสากลพื้นฐาน
-                    const deltaE = Math.sqrt(
-                        Math.pow(currentLab.L - target.L, 2) +
-                        Math.pow((currentLab.a - target.a) * 2.5, 2) + 
-                        Math.pow((currentLab.b - target.b) * 2.5, 2)
-                    );
+  analyzeBtn.disabled = false;
+  analyzeBtn.textContent = 'วิเคราะห์ผล';
+});
 
-                    // 2. คำนวณค่าความเข้มเฉดสีของเป้าหมายใน Dataset (Target Saturation)
-                    const targetSaturation = Math.sqrt(Math.pow(target.a, 2) + Math.pow(target.b, 2));
+/**
+ * pipeline หลัก: ROI + Lab ต่อรูป -> เฉลี่ยรวม -> SVM ทำนาย
+ * ถ้าไม่พบไฟล์ model_<fmt>.json (ยังไม่ได้เทรน/อัปโหลดขึ้น repo) จะ fallback
+ * เป็นการประมาณแบบ threshold ง่ายๆ พร้อมแจ้งเตือนให้ทราบชัดเจน
+ */
+async function classifyImages(files, fmt){
+  const labResults = [];
+  for (const file of files){
+    const r = await ROI.extract(file, fmt);
+    labResults.push(r);
+  }
 
-                    // 3. ตรวจสอบเงื่อนไขข้อเท็จจริง: ถ้าความเข้มข้นสารบอแรกซ์สูง (%สูง) เฉดสีในหลอดแก้วจะเข้มข้นและจัดจ้ากว่ากลุ่ม %ต่ำ
-                    // เพิ่มค่า Penalty (โทษปรับคะแนนระยะ) หากตัวเลือกขัดแย้งกับระดับความเข้มของเฉดสีจริง
-                    let saturationPenalty = 0;
-                    const isHighPercentTarget = parseFloat(target.concentration) >= 5;
+  const avgL = average(labResults.map(r => r.L));
+  const avgA = average(labResults.map(r => r.a));
+  const avgB = average(labResults.map(r => r.b));
 
-                    if (isHighPercentTarget && currentSaturation < targetSaturation * 0.9) {
-                        saturationPenalty = 15.0; // หากสีจริงจืด แต่สูตรเผลอดึงไปกลุ่ม % สูง จะโดนดีดกลับลงมา
-                    } else if (!isHighPercentTarget && currentSaturation > 14.5) {
-                        saturationPenalty = 15.0; // หากสีจริงเข้มจัดจ้ามากๆ แต่สูตรพยายามดึงลง % ต่ำ จะโดนปรับคะแนนหนี
-                    }
+  const model = await getModel(fmt);
 
-                    const finalScore = deltaE + saturationPenalty;
+  if (model){
+    const pred = model.predict({ L: avgL, a: avgA, b: avgB });
+    return {
+      material: FORMAT_LABEL[fmt],
+      concentrationLabel: pred.label + '%',
+      note: '',
+      thumbs: labResults.map(r => r.previewDataUrl),
+    };
+  }
 
-                    if (finalScore < minScore) {
-                        minScore = finalScore;
-                        closestMatch = target;
-                    }
-                });
+  // --- fallback: ยังไม่มีโมเดลจริงสำหรับฟอร์แมตนี้ ---
+  return {
+    material: FORMAT_LABEL[fmt],
+    concentrationLabel: mockThreshold(avgB),
+    note: `⚠️ ยังไม่พบ model_${fmt}.json บน repo — นี่คือค่าประมาณเบื้องต้นเท่านั้น (โปรดรัน train_svm.py แล้วอัปโหลดไฟล์โมเดล)`,
+    thumbs: labResults.map(r => r.previewDataUrl),
+  };
+}
 
-                document.getElementById('concentrationResult').innerText = closestMatch.concentration;
-                document.getElementById('resultArea').style.display = 'block';
-                return;
-            }
+async function getModel(fmt){
+  if (fmt in modelCache) return modelCache[fmt];
+  try {
+    const model = await SVM.load(`model_${fmt}.json`);
+    modelCache[fmt] = model;
+  } catch (e) {
+    console.warn(`โหลด model_${fmt}.json ไม่สำเร็จ:`, e.message);
+    modelCache[fmt] = null;
+  }
+  return modelCache[fmt];
+}
 
-            if (assignedCategory === "PAPER") {
-                objectDisplay.innerText = `วัตถุที่ตรวจพบ: กระดาษตรวจสอบ`;
-                objectDisplay.classList.add("type-paper");
-                
-                const deltaBasePaper = Math.sqrt(
-                    Math.pow(currentLab.L - basePaper.L, 2) +
-                    Math.pow(currentLab.a - basePaper.a, 2) +
-                    Math.pow(currentLab.b - basePaper.b, 2)
-                );
-                if (
+function mockThreshold(b){
+  if (b > 22) return '≥ 1% (ประมาณ)';
+  if (b > 20.5) return '0.7 - 0.9% (ประมาณ)';
+  if (b > 18) return '0.1 - 0.6% (ประมาณ)';
+  return '0% (ประมาณ)';
+}
+
+function average(arr){ return arr.reduce((s,v)=>s+v,0) / arr.length; }
+
+function showResult(result, fmt){
+  materialTag.textContent = 'วัตถุที่ตรวจพบ: ' + result.material;
+  concentrationEl.textContent = result.concentrationLabel;
+  resultNote.textContent = result.note;
+
+  resultThumbGrid.innerHTML = '';
+  result.thumbs.forEach(src => {
+    const img = document.createElement('img');
+    img.src = src;
+    resultThumbGrid.appendChild(img);
+  });
+
+  uploadCard.classList.add('hidden');
+  resultCard.classList.remove('hidden');
+  resultCard.scrollIntoView({ behavior:'smooth', block:'start' });
+}
+
+resetBtn.addEventListener('click', () => {
+  selectedFiles = [];
+  fileInput.value = '';
+  thumbGrid.innerHTML = '';
+  countPill.innerHTML = '';
+  errorBox.innerHTML = '';
+  analyzeBtn.disabled = true;
+
+  resultCard.classList.add('hidden');
+  uploadCard.classList.remove('hidden');
+});
+</script>
+
+</body>
+</html>
+```
+
+---
+
+## 6. web/roi.js
+
+```javascript
+/**
+ * roi.js
+ * ========
+ * สกัด ROI + ค่า Lab เฉลี่ยจากรูปภาพ ฝั่ง browser (ไม่ต้องส่งขึ้น server)
+ * ใช้ logic เดียวกับ lab_extractor.py (Python) แต่ทำงานบน <canvas>
+ *
+ * หมายเหตุ: เพื่อความเร็วบนมือถือ จะย่อรูปลงก่อนประมวลผล (ไม่กระทบค่าเฉลี่ยสี)
+ * และใช้ trimmed-mean แทนการทำ morphological erosion แบบเต็มรูปแบบใน Python
+ * (เพียงพอสำหรับตัด outlier ขอบ ROI ในทางปฏิบัติ)
+ */
+
+const ROI = {
+  /**
+   * @param {File} file
+   * @param {"paper"|"dipstick"|"solution"} fmt
+   * @param {{topCropRatio?: number}} opts  - topCropRatio: ตัด UI chrome ด้านบน (เช่น screenshot)
+   * @returns {Promise<{L:number, a:number, b:number, pixelCount:number, previewDataUrl:string}>}
+   */
+  async extract(file, fmt, opts = {}) {
+    const img = await loadImage(file);
+    const { canvas, ctx } = drawScaled(img, 360); // ย่อด้านยาวสุดให้ไม่เกิน 360px
+
+    let { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    const topCrop = Math.round((opts.topCropRatio || 0) * height);
+    if (topCrop > 0) {
+      const cropped = ctx.getImageData(0, topCrop, width, height - topCrop);
+      data = cropped.data;
+      height = cropped.height;
+    }
+
+    const maskFn = MASKS[fmt];
+    if (!maskFn) throw new Error(`ไม่รู้จักฟอร์แมต: ${fmt}`);
+
+    const mask = buildMask(data, width, height, maskFn);
+    const largest = largestComponent(mask, width, height);
+
+    if (largest.count < 30) {
+      throw new Error("หา ROI ไม่เจอ (ลองถ่ายใหม่ให้เห็นวัตถุชัดเจนขึ้น)");
+    }
+
+    const { L, a, b } = trimmedMeanLab(data, width, height, largest.mask);
+
+    return {
+      L, a, b,
+      pixelCount: largest.count,
+      previewDataUrl: canvas.toDataURL("image/jpeg", 0.7),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// เกณฑ์ segmentation ต่อฟอร์แมต (พอร์ตมาจาก lab_extractor.py)
+// รับ (h, s, v) แต่ละพิกเซล คืนค่า true/false ว่าเป็นส่วนหนึ่งของวัตถุที่สนใจไหม
+// ---------------------------------------------------------------------------
+const MASKS = {
+  paper: (h, s, v) => s > 0.10 && s < 0.6 && v > 0.4,
+  dipstick: (h, s, v) => s > 0.10 && v > 0.2 && v < 0.95,
+  solution: (h, s, v) => h > 0.28 && h < 0.58 && s > 0.08 && v < 0.85 && v > 0.03,
+};
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = (e) => { img.src = e.target.result; };
+    reader.onerror = reject;
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function drawScaled(img, maxSide) {
+  const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return { canvas, ctx };
+}
+
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const v = max;
+  const d = max - min;
+  const s = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+    if (h < 0) h += 1;
+  }
+  return [h, s, v];
+}
+
+function rgbToLab(r, g, b) {
+  [r, g, b] = [r, g, b].map((v) => {
+    v = v / 255;
+    return v > 0.04045 ? Math.pow((v + 0.055) / 1.055, 2.4) : v / 12.92;
+  });
+  const x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
+  const y = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 1.0;
+  const z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
+  const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  const fx = f(x), fy = f(y), fz = f(z);
+  return { L: 116 * fy - 16, a: 500 * (fx - fy), b: 200 * (fy - fz) };
+}
+
+function buildMask(data, width, height, maskFn) {
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    const o = i * 4;
+    const [h, s, v] = rgbToHsv(data[o], data[o + 1], data[o + 2]);
+    mask[i] = maskFn(h, s, v) ? 1 : 0;
+  }
+  return mask;
+}
+
+// หา connected component ที่ใหญ่ที่สุดด้วย flood fill (4-neighbour)
+function largestComponent(mask, width, height) {
+  const visited = new Uint8Array(width * height);
+  let best = { mask: null, count: 0 };
+
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || visited[start]) continue;
+
+    const stack = [start];
+    visited[start] = 1;
+    const region = [];
+
+    while (stack.length) {
+      const idx = stack.pop();
+      region.push(idx);
+      const x = idx % width, y = (idx / width) | 0;
+
+      const neighbours = [
+        x > 0 ? idx - 1 : -1,
+        x < width - 1 ? idx + 1 : -1,
+        y > 0 ? idx - width : -1,
+        y < height - 1 ? idx + width : -1,
+      ];
+      for (const n of neighbours) {
+        if (n >= 0 && mask[n] && !visited[n]) {
+          visited[n] = 1;
+          stack.push(n);
+        }
+      }
+    }
+
+    if (region.length > best.count) {
+      const regionMask = new Uint8Array(width * height);
+      for (const idx of region) regionMask[idx] = 1;
+      best = { mask: regionMask, count: region.length };
+    }
+  }
+  return best;
+}
+
+function trimmedMeanLab(data, width, height, regionMask, pct = 0.1) {
+  const Ls = [], as = [], bs = [];
+  for (let i = 0; i < regionMask.length; i++) {
+    if (!regionMask[i]) continue;
+    const o = i * 4;
+    const lab = rgbToLab(data[o], data[o + 1], data[o + 2]);
+    Ls.push(lab.L); as.push(lab.a); bs.push(lab.b);
+  }
+  const trim = (arr) => {
+    arr = [...arr].sort((x, y) => x - y);
+    const k = Math.floor(arr.length * pct);
+    const sliced = arr.slice(k, arr.length - k || arr.length);
+    return sliced.reduce((s, v) => s + v, 0) / sliced.length;
+  };
+  return { L: trim(Ls), a: trim(as), b: trim(bs) };
+}
+```
+
+---
+
+## 7. web/svm.js
+
+```javascript
+/**
+ * svm.js
+ * ========
+ * ทำนายผลจากโมเดล SVM (RBF kernel, multiclass one-vs-one) ที่ export มาจาก
+ * train_svm.py — ไม่ต้องพึ่ง library ใดๆ, คำนวณ decision function แบบเดียวกับ
+ * libsvm/sklearn ทุกประการ (อ่าน n_support / dual_coef / intercept ตรงๆ)
+ *
+ * ใช้งาน:
+ *   const model = await SVM.load("model_paper.json");
+ *   const { label, votes } = model.predict({ L: 55, a: -7, b: 21 });
+ */
+
+const SVM = {
+  async load(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`โหลดโมเดลไม่สำเร็จ: ${url}`);
+    const raw = await res.json();
+    return new SVMModel(raw);
+  },
+};
+
+class SVMModel {
+  constructor(raw) {
+    this.gamma = raw.gamma;
+    this.classes = raw.classes;
+    this.nSupport = raw.n_support;
+    this.supportVectors = raw.support_vectors; // [nSV][nFeat]
+    this.dualCoef = raw.dual_coef;              // [nClass-1][nSV]
+    this.intercept = raw.intercept;              // [nClass*(nClass-1)/2]
+    this.scalerMean = raw.scaler_mean;
+    this.scalerScale = raw.scaler_scale;
+    this.featureOrder = raw.feature_order || ["L", "a", "b"];
+
+    // ดัชนีเริ่มต้นของ SV แต่ละคลาสใน support_vectors (เรียงตามคลาส)
+    this.start = [0];
+    for (let i = 1; i < this.nSupport.length; i++) {
+      this.start[i] = this.start[i - 1] + this.nSupport[i - 1];
+    }
+  }
+
+  _scale(features) {
+    return this.featureOrder.map((key, i) => {
+      const v = features[key];
+      return (v - this.scalerMean[i]) / this.scalerScale[i];
+    });
+  }
+
+  _rbfKernel(x, sv) {
+    let sumSq = 0;
+    for (let i = 0; i < x.length; i++) {
+      const d = x[i] - sv[i];
+      sumSq += d * d;
+    }
+    return Math.exp(-this.gamma * sumSq);
+  }
+
+  /**
+   * ทำนายคลาส ด้วยวิธี one-vs-one voting แบบเดียวกับ libsvm/svm_predict
+   * (นี่คือวิธีที่ sklearn SVC.predict() ใช้จริงภายใน ไม่ว่า decision_function_shape จะเป็นอะไร)
+   */
+  predict(features) {
+    const x = this._scale(features);
+    const nClass = this.classes.length;
+
+    // precompute K(x, sv_i) สำหรับทุก SV
+    const kvalue = this.supportVectors.map((sv) => this._rbfKernel(x, sv));
+
+    const votes = new Array(nClass).fill(0);
+    const decisionValues = [];
+
+    let p = 0;
+    for (let i = 0; i < nClass; i++) {
+      for (let j = i + 1; j < nClass; j++) {
+        const si = this.start[i], ci = this.nSupport[i];
+        const sj = this.start[j], cj = this.nSupport[j];
+
+        const coef1 = this.dualCoef[j - 1]; // แถวสำหรับคลาส j มองมาที่ SV ของ i
+        const coef2 = this.dualCoef[i];     // แถวสำหรับคลาส i มองมาที่ SV ของ j
+
+        let sum = 0;
+        for (let k = 0; k < ci; k++) sum += coef1[si + k] * kvalue[si + k];
+        for (let k = 0; k < cj; k++) sum += coef2[sj + k] * kvalue[sj + k];
+        sum -= this.intercept[p];
+
+        decisionValues.push({ i, j, value: sum });
+        if (sum > 0) votes[i]++; else votes[j]++;
+        p++;
+      }
+    }
+
+    // เลือกคลาสที่ได้ vote มากสุด (ถ้าเสมอ sklearn จะเลือก index น้อยสุดที่เจอก่อน)
+    let bestIdx = 0;
+    for (let i = 1; i < nClass; i++) {
+      if (votes[i] > votes[bestIdx]) bestIdx = i;
+    }
+
+    return {
+      label: this.classes[bestIdx],
+      votes: this.classes.map((c, i) => ({ label: c, votes: votes[i] })),
+      decisionValues,
+    };
+  }
+}
+```
+
+---
+
+## 8. web/model_paper_demo.json
+
+```json
+{
+  "kernel": "rbf",
+  "gamma": 0.3333333333333333,
+  "classes": [
+    "0",
+    "0.1",
+    "0.2",
+    "0.3",
+    "0.4",
+    "0.5",
+    "0.6",
+    "0.7",
+    "0.8",
+    "0.9",
+    "1"
+  ],
+  "n_support": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "support_vectors": [
+    [
+      2.4560292440601046,
+      2.704330032592036,
+      -2.7032588966135984
+    ],
+    [
+      -1.0379333701482334,
+      0.6284452582514007,
+      -0.7635075364867443
+    ],
+    [
+      -0.5819947509847243,
+      0.15146202531229055,
+      0.014194634214270089
+    ],
+    [
+      -0.4174808162350036,
+      -0.9301478409299168,
+      0.04422174505214752
+    ],
+    [
+      -0.6619015192917308,
+      -0.4128561657706003,
+      0.07424885589002389
+    ],
+    [
+      0.05099219795705533,
+      0.14474395160892295,
+      -0.08789754263451169
+    ],
+    [
+      0.06039299422846826,
+      0.0775632145752457,
+      -0.012829765539819174
+    ],
+    [
+      -0.6901039081059684,
+      -0.7756321457524588,
+      0.7918968049152845
+    ],
+    [
+      -0.10412094052125127,
+      -1.239179231284833,
+      1.1101841797967815
+    ],
+    [
+      -0.5412579671419356,
+      -0.23818624948303896,
+      0.5937178733852962
+    ],
+    [
+      1.4673788361832159,
+      -0.11054284911905145,
+      0.9390296480208824
+    ]
+  ],
+  "dual_coef": [
+    [
+      1.0011606877564712,
+      -1.0011606877564712,
+      -1.000448331360447,
+      -1.000063045738011,
+      -1.000117291707817,
+      -1.00167782558235,
+      -1.0013274855759235,
+      -1.000011104906288,
+      -1.000004950662467,
+      -1.0000745538918099,
+      -1.0006183535940616
+    ],
+    [
+      1.000448331360447,
+      3.4128597879281886,
+      -3.4128597879281886,
+      -1.4596186013585144,
+      -2.1095625565200073,
+      -2.150777606920551,
+      -2.0041010855716377,
+      -1.2857792969896582,
+      -1.0782165347537476,
+      -1.6341431687544004,
+      -1.04074148510834
+    ],
+    [
+      1.000063045738011,
+      1.4596186013585144,
+      3.0376800006373306,
+      -3.0376800006373306,
+      -9.643025837596683,
+      -7.808193727462782,
+      -7.674043295555955,
+      -2.5733398551788316,
+      -1.4834724533225483,
+      -6.644386719952032,
+      -1.2213502035754626
+    ],
+    [
+      1.000117291707817,
+      2.1095625565200073,
+      9.643025837596683,
+      9.648943328644174,
+      -9.648943328644174,
+      -2.6932223717099872,
+      -2.9401236809306774,
+      -5.082948211371818,
+      -2.792511896776427,
+      -4.290563873134746,
+      -1.2304664995470154
+    ],
+    [
+      1.00167782558235,
+      2.150777606920551,
+      7.808193727462782,
+      2.6932223717099872,
+      4.071956963097531,
+      -4.071956963097531,
+      -4.418460219226757,
+      -5.151744038046938,
+      -2.008284891480754,
+      -10.0,
+      -1.2001764366128005
+    ],
+    [
+      1.0013274855759235,
+      2.0041010855716377,
+      7.674043295555955,
+      2.9401236809306774,
+      4.418460219226757,
+      10.0,
+      -10.0,
+      -1.9420313928568267,
+      -1.4807895471390446,
+      -3.6451946168184337,
+      -1.5450219796968105
+    ],
+    [
+      1.000011104906288,
+      1.2857792969896582,
+      2.5733398551788316,
+      5.082948211371818,
+      5.151744038046938,
+      1.9420313928568267,
+      2.100854230367465,
+      -2.100854230367465,
+      -1.5752674643337072,
+      -4.13929484120777,
+      -1.6069211367894
+    ],
+    [
+      1.000004950662467,
+      1.0782165347537476,
+      1.4834724533225483,
+      2.792511896776427,
+      2.008284891480754,
+      1.4807895471390446,
+      1.5752674643337072,
+      5.066802287023089,
+      -5.066802287023089,
+      -9.074352263366473,
+      -1.2218171257091224
+    ],
+    [
+      1.0000745538918099,
+      1.6341431687544004,
+      6.644386719952032,
+      4.290563873134746,
+      10.0,
+      3.6451946168184337,
+      4.13929484120777,
+      9.074352263366473,
+      2.5954486098664145,
+      -2.5954486098664145,
+      -1.3973167981726926
+    ],
+    [
+      1.0006183535940616,
+      1.04074148510834,
+      1.2213502035754626,
+      1.2304664995470154,
+      1.2001764366128005,
+      1.5450219796968105,
+      1.6069211367894,
+      1.2218171257091224,
+      1.3973167981726926,
+      1.3316686564976072,
+      -1.3316686564976072
+    ]
+  ],
+  "intercept": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "scaler_mean": [
+    55.54454545454546,
+    -6.585454545454545,
+    21.31272727272727
+  ],
+  "scaler_scale": [
+    6.382438068832265,
+    1.4885219248170842,
+    3.3303237377689134
+  ],
+  "feature_order": [
+    "L",
+    "a",
+    "b"
+  ]
+}```
