@@ -132,9 +132,11 @@
     </div>
 
     <script>
+        // === ค่าควบคุมความแม่นยำ (Baseline) ===
         const baseTube = { L: 15.82, a: -13.15, b: -7.05 };
         const basePaper = { L: 41.35, a: -13.50, b: -1.25 };
 
+        // === ฐานข้อมูล หลอดทดลอง ===
         const tubeDataset = [
             { concentration: "10%",   L: 16.63, a: -13.41, b: -6.71 },
             { concentration: "9%",    L: 16.89, a: -13.43, b: -6.47 },
@@ -157,6 +159,7 @@
             { concentration: "0.1%",  L: 21.68, a: -14.12, b: -2.04 }
         ];
 
+        // === ฐานข้อมูล กระดาษตรวจสอบ ===
         const paperDataset = [
             { concentration: "10%",  L: 28.45, a: -11.12, b: -8.15 },
             { concentration: "9%",   L: 29.10, a: -11.24, b: -7.80 },
@@ -203,6 +206,7 @@
             canvas.height = img.naturalHeight;
             ctx.drawImage(img, 0, 0);
 
+            // สแกนพื้นที่กลางภาพขนาด 20% แบบคัดกรองขยะพิกเซล
             const size = Math.floor(canvas.width * 0.20);
             const startX = Math.floor(canvas.width / 2) - Math.floor(size / 2);
             const startY = Math.floor(canvas.height / 2) - Math.floor(size / 2);
@@ -214,6 +218,7 @@
             for (let i = 0; i < imgData.length; i += 4) {
                 const r = imgData[i]; const g = imgData[i+1]; const b = imgData[i+2];
                 
+                // คัดแยกจุดสว่างจัด (แสงแฟลช/เงาสะท้อนขาว) ออกจากการคำนวณเนื้อสี
                 if (r > 230 && g > 230 && b > 230) {
                     whiteReflection++;
                     continue; 
@@ -222,9 +227,20 @@
                 validCount++;
             }
 
-            
-            
+            if (validCount === 0) { validCount = 1; }
 
+            const currentLab = rgbToLab(rSum / validCount, gSum / validCount, bSum / validCount);
+
+            // --- 1. แยกประเภทวัตถุ (Object Detection) ---
+            let isPaper = false;
+            let objectTypeLabel = "หลอดทดลอง";
+
+            if (currentLab.L > 24.5 && whiteReflection < (imgData.length / 4 * 0.06)) {
+                isPaper = true;
+                objectTypeLabel = "กระดาษตรวจสอบ";
+            }
+
+            // --- 2. ตรวจสอบค่าเบส (Baseline Verification) ---
             const activeBaseline = isPaper ? basePaper : baseTube;
             const distToBase = Math.sqrt(
                 Math.pow(currentLab.L - activeBaseline.L, 2) +
@@ -232,56 +248,35 @@
                 Math.pow(currentLab.b - activeBaseline.b, 2)
             );
 
-            if (distToBase < 1.2) {
-                
-                document.getElementById('concentrationResult').innerText = "0%";
+            // ปรับค่าเผื่อความคลาดเคลื่อน (Tolerance) ของแสงให้กระชับขึ้นที่ 1.5
+            if (distToBase < 1.5) {
+                document.getElementById('objectTypeDisplay').innerText = `ความเข้มข้นที่ตรวจสอบได้: ${objectTypeLabel}`;
+                document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
                 document.getElementById('resultArea').style.display = 'block';
                 return;
             }
 
+            // --- 3. ค้นหาค่า % ที่แม่นยำที่สุด (เสถียร ไม่ดีดไป 0.1% มั่ว) ---
             const activeDataset = isPaper ? paperDataset : tubeDataset;
-
-            // คำนวณช่วง Min/Max ของ Dataset เพื่อทำ Feature Scaling
-            let minL = Infinity, maxL = -Infinity;
-            let minA = Infinity, maxA = -Infinity;
-            let minB = Infinity, maxB = -Infinity;
-
-            activeDataset.forEach(d => {
-                if (d.L < minL) minL = d.L; if (d.L > maxL) maxL = d.L;
-                if (d.a < minA) minA = d.a; if (d.a > maxA) maxA = d.a;
-                if (d.b < minB) minB = d.b; if (d.b > maxB) maxB = d.b;
-            });
-
-            const rangeL = (maxL - minL) || 1;
-            const rangeA = (maxA - minA) || 1;
-            const rangeB = (maxB - minB) || 1;
-
-            // Normalize ค่าปัจจุบัน
-            const normL = (currentLab.L - minL) / rangeL;
-            const normA = (currentLab.a - minA) / rangeA;
-            const normB = (currentLab.b - minB) / rangeB;
-
             let closestMatch = activeDataset[0];
-            let minDistance = Infinity;
+            let minDeltaE = Infinity;
 
             activeDataset.forEach(target => {
-                const targetNormL = (target.L - minL) / rangeL;
-                const targetNormA = (target.a - minA) / rangeA;
-                const targetNormB = (target.b - minB) / rangeB;
+                // ใช้สมการคำนวณความต่างทางสีแบบรักษาสมดุล (ไม่ยกกำลังแรงเกินไปจนค่าเอียง)
+                const dL = currentLab.L - target.L;
+                const da = currentLab.a - target.a;
+                const db = currentLab.b - target.b;
 
-                const distance = Math.sqrt(
-                    Math.pow(normL - targetNormL, 2) +
-                    Math.pow(normA - targetNormA, 2) +
-                    Math.pow(normB - targetNormB, 2)
-                );
+                // ถ่วงน้ำหนักแกนเฉดสี (a, b) ให้มากกว่าความสว่าง (L) เล็กน้อยแบบสมดุล
+                const deltaE = Math.sqrt((dL * 0.8) * (dL * 0.8) + (da * 1.2) * (da * 1.2) + (db * 1.2) * (db * 1.2));
 
-                if (distance < minDistance) {
-                    minDistance = distance;
+                if (deltaE < minDeltaE) {
+                    minDeltaE = deltaE;
                     closestMatch = target;
                 }
             });
 
-            document.getElementById('objectTypeDisplay').innerText = `วัตถุที่ตรวจพบ: ${objectTypeLabel}`;
+            document.getElementById('objectTypeDisplay').innerText = `ความเข้มข้นที่ตรวจสอบได้: ${objectTypeLabel}`;
             document.getElementById('concentrationResult').innerText = closestMatch.concentration;
             document.getElementById('resultArea').style.display = 'block';
         }
