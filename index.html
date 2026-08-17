@@ -132,11 +132,10 @@
     </div>
 
     <script>
-        // === ค่าควบคุมความแม่นยำ (Baseline) ===
         const baseTube = { L: 15.82, a: -13.15, b: -7.05 };
         const basePaper = { L: 41.35, a: -13.50, b: -1.25 };
+        const baseDipstick = { L: 62.39, a: 0.22, b: 20.43 };
 
-        // === ฐานข้อมูล หลอดทดลอง ===
         const tubeDataset = [
             { concentration: "10%",   L: 16.63, a: -13.41, b: -6.71 },
             { concentration: "9%",    L: 16.89, a: -13.43, b: -6.47 },
@@ -159,7 +158,6 @@
             { concentration: "0.1%",  L: 21.68, a: -14.12, b: -2.04 }
         ];
 
-        // === ฐานข้อมูล กระดาษตรวจสอบ ===
         const paperDataset = [
             { concentration: "10%",  L: 28.45, a: -11.12, b: -8.15 },
             { concentration: "9%",   L: 29.10, a: -11.24, b: -7.80 },
@@ -180,6 +178,29 @@
             { concentration: "0.3%", L: 39.22, a: -13.38, b: -1.60 },
             { concentration: "0.2%", L: 39.80, a: -13.44, b: -1.35 },
             { concentration: "0.1%", L: 40.45, a: -13.48, b: -1.28 }
+        ];
+
+        const dipstickDataset = [
+            { concentration: "10%",   L: 41.16, a: 2.33,  b: 35.60 },
+            { concentration: "9%",    L: 32.36, a: 2.11,  b: 28.91 },
+            { concentration: "8%",    L: 46.21, a: 0.30,  b: 28.04 },
+            { concentration: "7%",    L: 32.93, a: -0.39, b: 26.36 },
+            { concentration: "6%",    L: 31.82, a: 1.13,  b: 25.73 },
+            { concentration: "5%",    L: 34.79, a: 0.40,  b: 26.58 },
+            { concentration: "4%",    L: 33.72, a: 0.58,  b: 28.61 },
+            { concentration: "3%",    L: 48.46, a: -0.69, b: 28.35 },
+            { concentration: "2%",    L: 39.13, a: 0.15,  b: 26.72 },
+            { concentration: "1%",    L: 44.88, a: -0.65, b: 24.80 },
+            { concentration: "0.9%",  L: 35.25, a: 1.93,  b: 28.26 },
+            { concentration: "0.8%",  L: 41.63, a: 1.01,  b: 29.57 },
+            { concentration: "0.7%",  L: 48.49, a: -0.29, b: 27.50 },
+            { concentration: "0.6%",  L: 46.03, a: 0.21,  b: 27.19 },
+            { concentration: "0.5%",  L: 51.06, a: -0.23, b: 23.24 },
+            { concentration: "0.4%",  L: 52.26, a: -0.57, b: 21.25 },
+            { concentration: "0.3%",  L: 52.83, a: -0.45, b: 20.98 },
+            { concentration: "0.2%",  L: 50.43, a: -0.21, b: 24.81 },
+            { concentration: "0.1%",  L: 48.86, a: -1.37, b: 22.86 },
+            { concentration: "0%",    L: 62.39, a: 0.22,  b: 20.43 }
         ];
 
         document.getElementById('fileInput').addEventListener('change', function(e) {
@@ -206,7 +227,6 @@
             canvas.height = img.naturalHeight;
             ctx.drawImage(img, 0, 0);
 
-            // สแกนพื้นที่กลางภาพขนาด 20% แบบคัดกรองขยะพิกเซล
             const size = Math.floor(canvas.width * 0.20);
             const startX = Math.floor(canvas.width / 2) - Math.floor(size / 2);
             const startY = Math.floor(canvas.height / 2) - Math.floor(size / 2);
@@ -218,8 +238,7 @@
             for (let i = 0; i < imgData.length; i += 4) {
                 const r = imgData[i]; const g = imgData[i+1]; const b = imgData[i+2];
                 
-                // คัดแยกจุดสว่างจัด (แสงแฟลช/เงาสะท้อนขาว) ออกจากการคำนวณเนื้อสี
-                if (r > 230 && g > 230 && b > 230) {
+                if (r > 240 && g > 240 && b > 240) {
                     whiteReflection++;
                     continue; 
                 }
@@ -231,52 +250,75 @@
 
             const currentLab = rgbToLab(rSum / validCount, gSum / validCount, bSum / validCount);
 
-            // --- 1. แยกประเภทวัตถุ (Object Detection) ---
-            let isPaper = false;
+            // จำแนกประเภทวัตถุ
+            let activeDataset = tubeDataset;
+            let activeBaseline = baseTube;
             let objectTypeLabel = "หลอดทดลอง";
 
-            if (currentLab.L > 24.5 && whiteReflection < (imgData.length / 4 * 0.06)) {
-                isPaper = true;
+            if (currentLab.b > 10) {
+                activeDataset = dipstickDataset;
+                activeBaseline = baseDipstick;
+                objectTypeLabel = "ไม้จิ้ม (Dipstick)";
+            } else if (currentLab.L > 24.5 && whiteReflection < (imgData.length / 4 * 0.06)) {
+                activeDataset = paperDataset;
+                activeBaseline = basePaper;
                 objectTypeLabel = "กระดาษตรวจสอบ";
             }
 
-            // --- 2. ตรวจสอบค่าเบส (Baseline Verification) ---
-            const activeBaseline = isPaper ? basePaper : baseTube;
+            // คำนวณระยะห่างเบสไลน์
             const distToBase = Math.sqrt(
                 Math.pow(currentLab.L - activeBaseline.L, 2) +
                 Math.pow(currentLab.a - activeBaseline.a, 2) +
                 Math.pow(currentLab.b - activeBaseline.b, 2)
             );
 
-            // ปรับค่าเผื่อความคลาดเคลื่อน (Tolerance) ของแสงให้กระชับขึ้นที่ 1.5
-            if (distToBase < 1.5) {
-                document.getElementById('objectTypeDisplay').innerText = `ความเข้มข้นที่ตรวจสอบได้: ${objectTypeLabel}`;
-                document.getElementById('concentrationResult').innerText = "เบสก่อนทดสอบ";
+            if (distToBase < 1.2) {
+                document.getElementById('objectTypeDisplay').innerText = `วัตถุที่ตรวจพบ: ${objectTypeLabel}`;
+                document.getElementById('concentrationResult').innerText = "0%";
                 document.getElementById('resultArea').style.display = 'block';
                 return;
             }
 
-            // --- 3. ค้นหาค่า % ที่แม่นยำที่สุด (เสถียร ไม่ดีดไป 0.1% มั่ว) ---
-            const activeDataset = isPaper ? paperDataset : tubeDataset;
+            // Feature Scaling
+            let minL = Infinity, maxL = -Infinity;
+            let minA = Infinity, maxA = -Infinity;
+            let minB = Infinity, maxB = -Infinity;
+
+            activeDataset.forEach(d => {
+                if (d.L < minL) minL = d.L; if (d.L > maxL) maxL = d.L;
+                if (d.a < minA) minA = d.a; if (d.a > maxA) maxA = d.a;
+                if (d.b < minB) minB = d.b; if (d.b > maxB) maxB = d.b;
+            });
+
+            const rangeL = (maxL - minL) || 1;
+            const rangeA = (maxA - minA) || 1;
+            const rangeB = (maxB - minB) || 1;
+
+            const normL = (currentLab.L - minL) / rangeL;
+            const normA = (currentLab.a - minA) / rangeA;
+            const normB = (currentLab.b - minB) / rangeB;
+
             let closestMatch = activeDataset[0];
-            let minDeltaE = Infinity;
+            let minDistance = Infinity;
 
             activeDataset.forEach(target => {
-                // ใช้สมการคำนวณความต่างทางสีแบบรักษาสมดุล (ไม่ยกกำลังแรงเกินไปจนค่าเอียง)
-                const dL = currentLab.L - target.L;
-                const da = currentLab.a - target.a;
-                const db = currentLab.b - target.b;
+                const targetNormL = (target.L - minL) / rangeL;
+                const targetNormA = (target.a - minA) / rangeA;
+                const targetNormB = (target.b - minB) / rangeB;
 
-                // ถ่วงน้ำหนักแกนเฉดสี (a, b) ให้มากกว่าความสว่าง (L) เล็กน้อยแบบสมดุล
-                const deltaE = Math.sqrt((dL * 0.8) * (dL * 0.8) + (da * 1.2) * (da * 1.2) + (db * 1.2) * (db * 1.2));
+                const distance = Math.sqrt(
+                    Math.pow(normL - targetNormL, 2) +
+                    Math.pow(normA - targetNormA, 2) +
+                    Math.pow(normB - targetNormB, 2)
+                );
 
-                if (deltaE < minDeltaE) {
-                    minDeltaE = deltaE;
+                if (distance < minDistance) {
+                    minDistance = distance;
                     closestMatch = target;
                 }
             });
 
-            document.getElementById('objectTypeDisplay').innerText = `ความเข้มข้นที่ตรวจสอบได้: ${objectTypeLabel}`;
+            document.getElementById('objectTypeDisplay').innerText = `วัตถุที่ตรวจพบ: ${objectTypeLabel}`;
             document.getElementById('concentrationResult').innerText = closestMatch.concentration;
             document.getElementById('resultArea').style.display = 'block';
         }
