@@ -1,38 +1,6 @@
-# Borax Detection Pipeline — โค้ดทั้งหมด (8 ไฟล์)
-
-คัดลอกแต่ละส่วนไปวางเป็นไฟล์ตามชื่อที่ระบุไว้ในโครงสร้างโฟลเดอร์นี้:
-
-```
-borax-pipeline/
-├── README.md
-├── paper_demo.csv
-├── python/
-│   ├── lab_extractor.py
-│   └── train_svm.py
-└── web/                      <-- โฟลเดอร์นี้คือส่วนที่ push ขึ้น GitHub Pages
-    ├── index.html
-    ├── roi.js
-    ├── svm.js
-    └── model_paper_demo.json
-```
-
----
-
-## 1. README.md
-
-```markdown
 # Borax Detection Pipeline (paper / dipstick / solution)
 
 ## โครงสร้าง
-```
-python/lab_extractor.py   สกัดค่า Lab จากรูป (3 ฟอร์แมต) -> CSV
-python/train_svm.py        เทรน SVM (RBF) จาก CSV -> model_<fmt>.json
-web/roi.js                 สกัด ROI + Lab ฝั่ง browser (canvas, ไม่ต้องมี server)
-web/svm.js                 ทำนายผลจาก model_<fmt>.json (libsvm-compatible, ไม่พึ่ง library)
-web/index.html             หน้าเว็บใช้งานจริง (อัปโหลดรูป -> วิเคราะห์ -> แสดงผล)
-paper_demo.csv             ตัวอย่างข้อมูล paper 0-1% (ค่าเฉลี่ยที่ verify แล้วจากบทสนทนา)
-web/model_paper_demo.json  โมเดลตัวอย่างจาก paper_demo.csv (ทดสอบ pipeline เท่านั้น)
-```
 
 ## ขั้นตอนใช้งานจริง
 
@@ -41,23 +9,7 @@ web/model_paper_demo.json  โมเดลตัวอย่างจาก pape
 2. **สกัดค่า Lab เป็น CSV:**
    ```bash
    python lab_extractor.py path/to/paper_images/ --fmt paper --out paper_dataset.csv
-   ```
-   แล้วเปิดไฟล์ CSV เพิ่มคอลัมน์ `label` ให้ตรงกับความเข้มข้นจริงของแต่ละรูป (หรือ band-group เช่น "0.2-0.6" ตามที่วิเคราะห์ไว้ในบทสนทนา)
-
-3. **เทรนโมเดล:**
-   ```bash
-   python train_svm.py paper_dataset.csv --fmt paper --out model_paper.json
-   ```
-   ทำซ้ำสำหรับ dipstick และ solution
-
-4. **นำ `model_paper.json`, `model_dipstick.json`, `model_solution.json` ไปวางไว้ในโฟลเดอร์เดียวกับ `web/index.html`** แล้ว push ขึ้น GitHub Pages — หน้าเว็บจะโหลดโมเดลเหล่านี้อัตโนมัติ
-
-## ⚠️ ข้อควรระวังก่อนใช้จริง
-
-- **`model_paper_demo.json` เทรนจาก 1 ตัวอย่าง/คลาส (11 คลาส) เท่านั้น** — ใช้พิสูจน์ว่าโค้ด pipeline ทำงานถูกต้องแบบ end-to-end (Python export → JS decision function ตรงกับ sklearn) แต่**ไม่ควรใช้ตัดสินผลจริง** เพราะไม่มีการวัดความแปรปรวนเลย
-- ตามที่วิเคราะห์ไว้ในบทสนทนา: บาง class ใกล้กัน (เช่น paper 0.2-0.6%) แยกด้วย Lab ธรรมดายาก — ควรพิจารณา label เป็น band-group แทนการแยกละเอียดทีละ 0.1% ตามที่คุยกันไว้
-- `web/roi.js` เป็น simplified port จาก Python (ไม่มี morphological erosion เต็มรูปแบบ) ควรทดสอบเทียบผลกับ Python ก่อน deploy จริง
-```
+python train_svm.py paper_dataset.csv --fmt paper --out model_paper.json
 
 ---
 
@@ -76,13 +28,6 @@ label,L,a,b
 0.8,54.88,-8.43,25.01
 0.9,52.09,-6.94,23.29
 1,64.91,-6.75,24.44
-```
-
----
-
-## 3. python/lab_extractor.py
-
-```python
 """
 lab_extractor.py
 =================
@@ -260,13 +205,6 @@ if __name__ == "__main__":
             writer.writerows(rows)
         print(f"\nบันทึก {len(rows)} แถวไปที่ {args.out}")
         print("*** อย่าลืมเพิ่มคอลัมน์ 'label' (ความเข้มข้น/กลุ่ม) ก่อนนำไปเทรน ***")
-```
-
----
-
-## 4. python/train_svm.py
-
-```python
 """
 train_svm.py
 =============
@@ -374,13 +312,6 @@ if __name__ == "__main__":
 
     model, scaler = train(X, y)
     export_model(model, scaler, sorted(set(y)), out_path)
-```
-
----
-
-## 5. web/index.html
-
-```html
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -720,13 +651,6 @@ resetBtn.addEventListener('click', () => {
 
 </body>
 </html>
-```
-
----
-
-## 6. web/roi.js
-
-```javascript
 /**
  * roi.js
  * ========
@@ -909,13 +833,6 @@ function trimmedMeanLab(data, width, height, regionMask, pct = 0.1) {
   };
   return { L: trim(Ls), a: trim(as), b: trim(bs) };
 }
-```
-
----
-
-## 7. web/svm.js
-
-```javascript
 /**
  * svm.js
  * ========
@@ -1018,15 +935,7 @@ class SVMModel {
       decisionValues,
     };
   }
-}
-```
-
----
-
-## 8. web/model_paper_demo.json
-
-```json
-{
+}{
   "kernel": "rbf",
   "gamma": 0.3333333333333333,
   "classes": [
@@ -1317,3 +1226,4 @@ class SVMModel {
     "b"
   ]
 }```
+
