@@ -226,13 +226,7 @@
 
             const currentLab = rgbToLab(rSum / validCount, gSum / validCount, bSum / validCount);
 
-            let isPaper = false;
-            let objectTypeLabel = "หลอดทดลอง";
-
-            if (currentLab.L > 24.5 && whiteReflection < (imgData.length / 4 * 0.06)) {
-                isPaper = true;
-                objectTypeLabel = "กระดาษตรวจสอบ";
-            }
+            
 
             const activeBaseline = isPaper ? basePaper : baseTube;
             const distToBase = Math.sqrt(
